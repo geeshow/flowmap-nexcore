@@ -1,0 +1,15 @@
+# flowmap.config — flowmap-nexcore(NEXCORE 분석기) 실행 설정.
+#   인자 없는 `./gradlew run` 과 scripts/NN-*.sh(01-refresh, 02-sync)가 이 파일을 읽는다.
+# 사용법: 이 파일을 `flowmap.config` 로 복사한 뒤 값을 채운다.
+#   real(flowmap.config) 은 머신별 설정이라 .gitignore 대상이고, 템플릿(flowmap.config.example)만 추적된다.
+# 형식: KEY=VALUE, '#' 주석, ${VAR}/$VAR 치환(앞 키 → 환경변수 순).
+
+# ───────────── 필수 (required) ─────────────
+# 분석 대상 NEXCORE repo 루트                                  -> --repo
+REPO=../nexcore
+
+# ───────────── 선택 (optional) ─────────────
+# COMMAND=refresh             # 실행 명령 (analyze|combine|openapi|impact|refresh|sync)
+# OUT_DIR=json                # 산출물(스테이징) 디렉터리 — json/service/<svc>/ 트리 생성  -> --out-dir
+# SYNC_DIR=../docs/web/data   # 02-sync.sh 가 staging 트리를 펼쳐 넣을 웹앱 data 디렉터리
+# EXTRA_ARGS=                 # 추가 플래그 (예: --no-impact --impact-depth 4)
