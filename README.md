@@ -1,11 +1,16 @@
 # flowmap-nexcore
 
 NEXCORE(BizUnit 프레임웍) 코드베이스를 **JavaParser** 로 정적 분석해
-[`flowmap-spring`](../flowmap-spring) 과 **동일한 형태의 산출물**(node-link 콜그래프 JSON,
+`flowmap-spring` 과 **동일한 형태의 산출물**(node-link 콜그래프 JSON,
 `_combined.json`, `_manifest.json`, OpenAPI 3.1, 변경영향도 impact JSON)을 만드는 **Java/Gradle 분석기**.
 
-기존 IntelliJ 플러그인 `../nexcore-hierarchy` 의 호출 16종(CallKind)·헬퍼 인라인·cross-module resolve
+기존 IntelliJ 플러그인 `nexcore-hierarchy` 의 호출 16종(CallKind)·헬퍼 인라인·cross-module resolve
 로직을 standalone 으로 재구현하고, 출력은 flowmap 스키마로 맞춰 같은 웹 렌더러에 그대로 투입할 수 있다.
+
+> **이 저장소는 flowmap 분석 파이프라인의 nexcore 분석기**다. 백엔드(`flowmap-spring`)·프론트
+> (`flowmap-react`) 분석기와 웹 허브(`flowmap`)를 **형제 디렉터리로 함께 체크아웃**하는 것을
+> 전제로 한다 — 아래 `../docs/web/data` 같은 상대경로가 그 레이아웃 기준이다.
+> 통합 모노레포: <https://github.com/geeshow/flowmap5>
 
 ## 설정 (필수)
 
@@ -30,7 +35,7 @@ cp flowmap.config.example flowmap.config   # REPO 등 값 작성 후 ./gradlew r
 ./gradlew run --args="refresh --repo ../nexcore --out-dir ./json"
 
 # staging 산출물을 flowmap 웹앱 data 디렉토리로 동기화 (refresh 와 분리된 별도 단계)
-./gradlew run --args="sync --out-dir ./json --sync-dir ../flowmap/docs/web/data"
+./gradlew run --args="sync --out-dir ./json --sync-dir ../docs/web/data"
 
 # 인자 없이 → flowmap.config 의 설정으로 실행 (flowmap.config.example 복사)
 ./gradlew run
@@ -95,7 +100,8 @@ DB 접근은 `db:io`. `kind`/`mode` 는 flowmap enum(`internal|external|s2s|batc
 | `refresh [--repo <r>] [--out-dir <d>] [--no-impact]` | 위 전부 오케스트레이션 → `<out-dir>/service/<svc>/` 트리 + 집계본 |
 | `sync --out-dir <d> --sync-dir <web>` | staging 서비스 트리를 웹 data 로 flat 펼침 + manifest 병합 (재분석 없음) |
 
-산출물 스키마/연동은 `../flowmap-spring/MANUAL.md` 4장과 동일하다.
+산출물 스키마/연동은 `flowmap-spring` 의 `MANUAL.md` 4장과 동일하다(형제 디렉터리 또는
+[모노레포](https://github.com/geeshow/flowmap5) 참고).
 
 ## 빌드/테스트
 
