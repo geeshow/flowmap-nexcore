@@ -13,10 +13,16 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Service-to-service combine. Merges per-project graphs and reconnects
- * {@code ext:SHARED#<comp>.<Unit>.<method>} placeholders (cross-project shared calls /
- * batch→online) to the real unit node, re-labelling those edges {@code s2s}. Shared
- * resources ({@code db:table:*}, {@code kafka:*}) merge by id automatically.
+ * Service-to-service combine. Merges per-project graphs and reconnects placeholders to the
+ * real target node, re-labelling those edges {@code s2s}:
+ * <ul>
+ *   <li>{@code ext:SHARED#<comp>.<Unit>.<method>} — cross-project shared calls / batch→online,
+ *       matched by {@code <Unit>#<method>} suffix;</li>
+ *   <li>{@code ext:LINKED#<token>} — 연동거래 ({@code callService*}) whose token is a transaction
+ *       id (possibly behind a {@code /std}/{@code /lng} prefix and/or {@code .jmd}), matched to the
+ *       target ProcessUnit entry via its bare-token alias. Service-code targets stay external.</li>
+ * </ul>
+ * Shared resources ({@code db:table:*}, {@code kafka:*}) merge by id automatically.
  */
 public final class CrossRun {
 
@@ -63,13 +69,33 @@ public final class CrossRun {
             }
         }
 
-        // drop ext:SHARED nodes no longer referenced
+        // reconnect ext:LINKED placeholders (연동거래 callService*) whose token resolves to a
+        // ProcessUnit transaction in THIS run. A linked call carries a transaction id, often
+        // behind a context prefix and/or .jmd extension (`/std/TACU0001.jmd`, `/lng/TACU0001`,
+        // `TACU0001`); the bare token (`TACU0001`) is what each ProcessUnit entry declares as
+        // an alias. Probe each path segment (sans .jmd) against the alias index — the prefix
+        // segment (std/lng/…) misses, the token hits → reconnect to the real entry as s2s.
+        // Linked targets that are service codes (e.g. `TXN_LIMIT_CHECK`, not a transaction)
+        // miss entirely and stay external.
+        Map<String, String> aliasToId = aliasIndex(nodes.values());
+        for (Map<String, Object> edge : edges) {
+            String target = (String) edge.get("target");
+            if (target == null || !target.startsWith("ext:LINKED#")) continue;
+            String realId = resolveJmdAlias(target.substring("ext:LINKED#".length()), aliasToId);
+            if (realId != null) {
+                edge.put("target", realId);
+                edge.put("kind", "s2s");
+            }
+        }
+
+        // drop ext:SHARED / ext:LINKED placeholder nodes no longer referenced (reconnected away)
         Set<String> referenced = new LinkedHashSet<>();
         for (Map<String, Object> edge : edges) {
             referenced.add((String) edge.get("source"));
             referenced.add((String) edge.get("target"));
         }
-        nodes.keySet().removeIf(id -> id.startsWith("ext:SHARED#") && !referenced.contains(id));
+        nodes.keySet().removeIf(id -> (id.startsWith("ext:SHARED#") || id.startsWith("ext:LINKED#"))
+                && !referenced.contains(id));
 
         long s2s = edges.stream().filter(e -> "s2s".equals(e.get("kind"))).count();
 
@@ -92,6 +118,40 @@ public final class CrossRun {
         for (String id : ids) {
             if (id.startsWith("ext:") || id.startsWith("db:") || id.startsWith("kafka:")) continue;
             if (id.endsWith(suffix)) return id;
+        }
+        return null;
+    }
+
+    /** Bare transaction token (a node's {@code aliases}) → real node id, for real (non-ext) nodes. */
+    @SuppressWarnings("unchecked")
+    private static Map<String, String> aliasIndex(Iterable<Map<String, Object>> nodes) {
+        Map<String, String> index = new LinkedHashMap<>();
+        for (Map<String, Object> node : nodes) {
+            String id = (String) node.get("id");
+            if (id == null || id.startsWith("ext:") || id.startsWith("db:") || id.startsWith("kafka:")) continue;
+            Object aliases = node.get("aliases");
+            if (!(aliases instanceof List)) continue;
+            for (Object a : (List<Object>) aliases) {
+                if (a != null) index.putIfAbsent(String.valueOf(a), id);
+            }
+        }
+        return index;
+    }
+
+    /**
+     * Resolve a linked-call token to a real node via the alias index. Splits on {@code /},
+     * strips a {@code .jmd} extension per segment, and returns the first segment that hits an
+     * alias — so a context prefix ({@code std}/{@code lng}/…) is skipped and only the
+     * transaction token ({@code TACU0001}) matches. Null when nothing matches (e.g. a service
+     * code, not a transaction).
+     */
+    private static String resolveJmdAlias(String raw, Map<String, String> aliasToId) {
+        if (raw == null || aliasToId.isEmpty()) return null;
+        for (String seg : raw.split("/")) {
+            if (seg.isEmpty()) continue;
+            String token = seg.replaceAll("(?i)\\.jmd$", "");
+            String id = aliasToId.get(token);
+            if (id != null) return id;
         }
         return null;
     }
