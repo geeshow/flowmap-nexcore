@@ -44,6 +44,23 @@ public final class GitLog {
         }
     }
 
+    /**
+     * Basename of the git work-tree root (e.g. {@code nexcore}) — used as the monorepo
+     * identifier. Falls back to the repo directory name when git can't resolve it.
+     */
+    public String repoName() {
+        try {
+            String top = run("rev-parse", "--show-toplevel").trim();
+            if (!top.isEmpty()) {
+                Path name = Path.of(top).getFileName();
+                if (name != null) return name.toString();
+            }
+        } catch (Exception ignore) {
+        }
+        Path name = repo.toAbsolutePath().normalize().getFileName();
+        return name == null ? "repo" : name.toString();
+    }
+
     public String resolveBranch(String requested) {
         if (requested != null) return requested;
         for (String cand : new String[]{"origin/HEAD", "main", "master", "develop", "HEAD"}) {

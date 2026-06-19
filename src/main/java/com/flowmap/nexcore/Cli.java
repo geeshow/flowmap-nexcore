@@ -157,15 +157,23 @@ public final class Cli {
         SourceScanner.Scan all = SourceScanner.scan(repo, null);
         com.flowmap.nexcore.nexcore.UnitIndex global = new com.flowmap.nexcore.nexcore.UnitIndex(all);
 
+        // 모노레포 판정: 한 git repo 아래 모듈(=project) 2개 이상이면 pulls/impact 를 repo 단위 1벌로 둔다.
+        //   gitRepoMark(=git work-tree 이름)를 각 모듈 그래프 meta.gitRepo 에 찍어 두면, sync(spring/nexcore)
+        //   가 manifest 의 repo 필드로 출력하고 웹이 모듈↔repo 를 잇는다. (단일 모듈이면 standalone 유지)
+        GitLog git = new GitLog(repo);
+        boolean isGit = git.isGitRepo();
         List<String> projects = discoverProjects(repo);
+        String gitRepoMark = (isGit && projects.size() >= 2) ? git.repoName() : null;
+
         List<String> built = new ArrayList<>();
         for (String project : projects) {
             SourceScanner.Scan scan = SourceScanner.scan(repo, project);
             if (scan.units.isEmpty()) continue; // no ghost graphs
             CallGraph graph = GraphBuilder.buildProject(global, project);
             Path svc = serviceDir(outDir, project);
-            JsonOutput.write(graph.toNodeLink(analyzeMeta(repo.toString(), project, scan, graph)),
-                    svc.resolve("graph.json"));
+            Map<String, Object> meta = analyzeMeta(repo.toString(), project, scan, graph);
+            if (gitRepoMark != null) meta.put("gitRepo", gitRepoMark);   // 모노레포 마커
+            JsonOutput.write(graph.toNodeLink(meta), svc.resolve("graph.json"));
             LinkedHashMap<String, Object> doc = OpenApi.generate(scan, repo, project, "1.0.0");
             JsonOutput.write(doc, svc.resolve("openapi.json"));
             built.add(project);
@@ -178,9 +186,20 @@ public final class Cli {
         JsonOutput.write(CrossRun.combine(graphs), outDir.resolve("_combined.json"));
         JsonOutput.write(OpenApi.generate(all, repo, allTitle, "1.0.0"), outDir.resolve("_openapi.json"));
 
-        // impact per project (needs git history)
-        GitLog git = new GitLog(repo);
-        if (doImpact && git.isGitRepo()) {
+        // impact (needs git history)
+        boolean monorepo = gitRepoMark != null && built.size() >= 2 && !built.contains(gitRepoMark);
+        if (doImpact && isGit && monorepo) {
+            // 모노레포: 합쳐진 그래프(_combined.json)로 repo 단위 impact 1벌 → service/<repo>/impact.json
+            //   (graph 없는 repo 엔트리). PR 은 repo 전체에서 1번씩만 집계되고, impactedEndpoints 의
+            //   service 는 노드 project(=모듈)라 웹이 모듈 단위로 귀속한다.
+            Path repoSvc = serviceDir(outDir, gitRepoMark);
+            Files.createDirectories(repoSvc);
+            LinkedHashMap<String, Object> result = Impact.run(git,
+                    outDir.resolve("_combined.json"), null, impactMax, impactDepth, null);
+            JsonOutput.write(result, repoSvc.resolve("impact.json"));
+            built.add(gitRepoMark);   // sync/manifest 가 repo 엔트리(impact 전용)를 포함하도록
+            System.out.println("  impact analyzed (repo-level: " + gitRepoMark + ")");
+        } else if (doImpact && isGit) {
             for (String project : built) {
                 Path svc = serviceDir(outDir, project);
                 LinkedHashMap<String, Object> result = Impact.run(git,
@@ -278,14 +297,18 @@ public final class Cli {
         return outDir.resolve("service").resolve(project);
     }
 
-    /** Project names present in the staging tree (a {@code service/<p>/graph.json} exists). */
+    /**
+     * Project names present in the staging tree — dirs with a {@code graph.json} (modules) OR
+     * with only an {@code impact.json} (graph-less repo-level impact unit for a monorepo).
+     */
     private static List<String> builtProjects(Path outDir) throws IOException {
         List<String> out = new ArrayList<>();
         Path serviceRoot = outDir.resolve("service");
         if (!Files.isDirectory(serviceRoot)) return out;
         try (Stream<Path> s = Files.list(serviceRoot)) {
             s.filter(Files::isDirectory)
-                    .filter(d -> Files.isRegularFile(d.resolve("graph.json")))
+                    .filter(d -> Files.isRegularFile(d.resolve("graph.json"))
+                            || Files.isRegularFile(d.resolve("impact.json")))
                     .map(d -> d.getFileName().toString())
                     .sorted()
                     .forEach(out::add);

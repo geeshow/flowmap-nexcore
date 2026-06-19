@@ -64,9 +64,14 @@ public final class Manifest {
             }
             int edges = root.path("edges").size();
 
+            JsonNode meta = root.path("meta");
+            JsonNode gitRepo = meta.path("gitRepo");
+            String repo = (gitRepo.isNull() || gitRepo.isMissingNode()) ? null : gitRepo.asText(null);
+
             Map<String, Object> proj = new LinkedHashMap<>();
             proj.put("name", name);
             proj.put("type", "backend");
+            proj.put("repo", repo);   // 모노레포 마커(gitRepo) — 모듈↔repo 연결
             proj.put("graph", name + ".json");
             proj.put("openapi", sibling(dir, "openapi.json", name + ".openapi.json"));
             proj.put("impact", sibling(dir, "impact.json", name + ".impact.json"));
@@ -90,6 +95,20 @@ public final class Manifest {
             projects.add(proj);
         }
 
+        // graph 없는 repo 단위 impact 엔트리(모노레포 pulls/impact 단위) — service/<repo>/impact.json 만 있고
+        // graph.json 은 없는 디렉터리. spring 의 impactOnlyEntries 와 같은 역할(웹 commit/PR 뷰에서만 사용).
+        if (Files.isDirectory(serviceRoot)) {
+            try (Stream<Path> s = Files.list(serviceRoot)) {
+                s.filter(Files::isDirectory)
+                        .filter(d -> Files.isRegularFile(d.resolve("impact.json")))
+                        .filter(d -> !Files.isRegularFile(d.resolve("graph.json")))
+                        .sorted()
+                        .forEach(d -> projects.add(impactOnlyEntry(d)));
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to list " + serviceRoot, e);
+            }
+        }
+
         Map<String, Object> manifest = new LinkedHashMap<>();
         manifest.put("version", 1);
         manifest.put("generated", Instant.now().toString());
@@ -100,5 +119,26 @@ public final class Manifest {
     /** Web name for a staging sibling, or null when the sibling file is absent. */
     private static String sibling(Path serviceDir, String stagingFile, String webName) {
         return Files.isRegularFile(serviceDir.resolve(stagingFile)) ? webName : null;
+    }
+
+    /** graph 없는 repo 단위 impact 엔트리 — name===repo, graph/openapi/pulls 는 null. */
+    private static Map<String, Object> impactOnlyEntry(Path dir) {
+        String name = dir.getFileName().toString();
+        Map<String, Object> proj = new LinkedHashMap<>();
+        proj.put("name", name);
+        proj.put("type", "backend");
+        proj.put("repo", name);             // repo 단위 엔트리는 repo===name
+        proj.put("graph", null);
+        proj.put("openapi", null);
+        proj.put("impact", name + ".impact.json");
+        proj.put("pulls", null);
+        proj.put("join", null);
+        proj.put("screens", null);
+        proj.put("nodes", 0);
+        proj.put("edges", 0);
+        proj.put("entryPoints", new TreeMap<>());
+        proj.put("modules", new ArrayList<>());
+        proj.put("generated", Instant.now().toString());
+        return proj;
     }
 }
