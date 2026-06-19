@@ -75,7 +75,7 @@ public final class Manifest {
             proj.put("graph", name + ".json");
             proj.put("openapi", sibling(dir, "openapi.json", name + ".openapi.json"));
             proj.put("impact", sibling(dir, "impact.json", name + ".impact.json"));
-            proj.put("pulls", null);
+            proj.put("pulls", sibling(dir, "pulls.json", name + ".pulls.json"));
             proj.put("join", null);
             proj.put("screens", null);
             proj.put("nodes", nodes);
@@ -131,7 +131,7 @@ public final class Manifest {
         proj.put("graph", null);
         proj.put("openapi", null);
         proj.put("impact", name + ".impact.json");
-        proj.put("pulls", null);
+        proj.put("pulls", sibling(dir, "pulls.json", name + ".pulls.json"));
         proj.put("join", null);
         proj.put("screens", null);
         proj.put("nodes", 0);

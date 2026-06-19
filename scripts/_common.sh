@@ -22,5 +22,8 @@ REPO="${REPO:-$(cfg REPO)}";          REPO="${REPO:-../nexcore}"
 OUT_DIR="${OUT_DIR:-$(cfg OUT_DIR)}";  OUT_DIR="${OUT_DIR:-json}"
 
 BIN="build/install/flowmap-nexcore/bin/flowmap-nexcore"
-# build the CLI if it isn't installed yet (incremental; no-op when up to date)
-[ -x "$BIN" ] || ./gradlew -q installDist
+# (re)build the CLI. ALWAYS run installDist — Gradle is incremental, so it recompiles
+# only when sources changed and is a near-instant no-op otherwise. Guarding on
+# `[ -x "$BIN" ]` would skip the rebuild whenever an old install exists, so source
+# fixes never take effect and the pipeline keeps using stale compiled classes.
+./gradlew -q installDist
