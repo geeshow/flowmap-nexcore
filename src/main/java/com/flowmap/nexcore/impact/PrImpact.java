@@ -109,7 +109,12 @@ public final class PrImpact {
                 }
 
                 // deleted methods: present in the PR's base blob, gone after the merge.
-                if (parent != null) {
+                // Guard: only trust the "gone" set when the file is an outright DELETE or the new
+                // blob PARSED — else a new blob that failed to parse (e.g. a syntactically broken
+                // commit) would yield an empty new-method set and falsely flag every old method as
+                // deleted. (A genuinely valid file with zero methods still parses, so real deletions
+                // are still detected.)
+                if (parent != null && ("DELETE".equals(ch.changeType) || newParsed.parsed)) {
                     String oldPath = ch.oldPath != null ? ch.oldPath : ch.path;
                     String oldText = git.fileAt(parent, oldPath);
                     List<Fn> oldFns = oldText == null ? List.of() : parseUnit(parser, oldText).fns;
@@ -272,13 +277,15 @@ public final class PrImpact {
     }
 
     private static final class Parsed {
-        static final Parsed EMPTY = new Parsed(List.of(), Set.of());
+        static final Parsed EMPTY = new Parsed(List.of(), Set.of(), false);
         final List<Fn> fns;
         final Set<Integer> codeLines;
+        final boolean parsed;   // true only when JavaParser succeeded (distinguishes "no methods" from "parse failed")
 
-        Parsed(List<Fn> fns, Set<Integer> codeLines) {
+        Parsed(List<Fn> fns, Set<Integer> codeLines, boolean parsed) {
             this.fns = fns;
             this.codeLines = codeLines;
+            this.parsed = parsed;
         }
     }
 
@@ -321,6 +328,6 @@ public final class PrImpact {
                 }
             }
         }
-        return new Parsed(fns, code);
+        return new Parsed(fns, code, true);
     }
 }
