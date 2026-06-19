@@ -1,8 +1,10 @@
 package com.flowmap.nexcore;
 
 import com.flowmap.nexcore.combine.CrossRun;
+import com.flowmap.nexcore.impact.GitHub;
 import com.flowmap.nexcore.impact.GitLog;
 import com.flowmap.nexcore.impact.Impact;
+import com.flowmap.nexcore.impact.PrImpact;
 import com.flowmap.nexcore.model.CallGraph;
 import com.flowmap.nexcore.nexcore.GraphBuilder;
 import com.flowmap.nexcore.nexcore.SourceScanner;
@@ -18,6 +20,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -186,29 +189,34 @@ public final class Cli {
         JsonOutput.write(CrossRun.combine(graphs), outDir.resolve("_combined.json"));
         JsonOutput.write(OpenApi.generate(all, repo, allTitle, "1.0.0"), outDir.resolve("_openapi.json"));
 
-        // impact (needs git history)
+        // impact + pulls (needs git history). PR-based, per-service — identical file paths and
+        // schema to flowmap-spring: <svc>.pulls.json + <svc>.pulls/<n>.json and
+        // <svc>.impact.json (bare impact.json staging name) + <svc>.impact/<n>.json shards.
         boolean monorepo = gitRepoMark != null && built.size() >= 2 && !built.contains(gitRepoMark);
         if (doImpact && isGit && monorepo) {
-            // 모노레포: 합쳐진 그래프(_combined.json)로 repo 단위 impact 1벌 → service/<repo>/impact.json
+            // 모노레포: 합쳐진 그래프(_combined.json)로 repo 단위 pulls/impact 1벌 → service/<repo>/.
             //   (graph 없는 repo 엔트리). PR 은 repo 전체에서 1번씩만 집계되고, impactedEndpoints 의
-            //   service 는 노드 project(=모듈)라 웹이 모듈 단위로 귀속한다.
+            //   service 는 노드 project(=모듈)라 웹이 모듈 단위로 귀속한다. (spring 모노레포와 동일)
             Path repoSvc = serviceDir(outDir, gitRepoMark);
             Files.createDirectories(repoSvc);
-            // 이전(모듈별) 실행이 남긴 모듈 impact.json 은 제거 — repo 단위 1벌만 남겨 중복/스테일을 막는다.
-            for (String project : built) Files.deleteIfExists(serviceDir(outDir, project).resolve("impact.json"));
-            LinkedHashMap<String, Object> result = Impact.run(git,
-                    outDir.resolve("_combined.json"), null, impactMax, impactDepth, null);
-            JsonOutput.write(result, repoSvc.resolve("impact.json"));
-            built.add(gitRepoMark);   // sync/manifest 가 repo 엔트리(impact 전용)를 포함하도록
-            System.out.println("  impact analyzed (repo-level: " + gitRepoMark + ")");
+            // 이전(모듈별) 실행이 남긴 모듈 pulls/impact 는 제거 — repo 단위 1벌만 남긴다.
+            for (String project : built) {
+                Path p = serviceDir(outDir, project);
+                Files.deleteIfExists(p.resolve("impact.json"));
+                Files.deleteIfExists(p.resolve("pulls.json"));
+                deleteDirRecursive(p.resolve(project + ".impact"));
+                deleteDirRecursive(p.resolve(project + ".pulls"));
+            }
+            generatePullsAndImpact(git, repo.toFile(), gitRepoMark, repoSvc,
+                    outDir.resolve("_combined.json"), impactMax);
+            built.add(gitRepoMark);   // sync/manifest 가 repo 엔트리(pulls/impact 전용)를 포함하도록
+            System.out.println("  pulls/impact analyzed (repo-level: " + gitRepoMark + ")");
         } else if (doImpact && isGit) {
             for (String project : built) {
                 Path svc = serviceDir(outDir, project);
-                LinkedHashMap<String, Object> result = Impact.run(git,
-                        svc.resolve("graph.json"), null, impactMax, impactDepth, null);
-                JsonOutput.write(result, svc.resolve("impact.json"));
+                generatePullsAndImpact(git, repo.toFile(), project, svc, svc.resolve("graph.json"), impactMax);
             }
-            System.out.println("  impact analyzed (" + built.size() + " projects)");
+            System.out.println("  pulls/impact analyzed (" + built.size() + " projects)");
         } else if (doImpact) {
             System.out.println("  impact skipped (" + repo + " is not a git repository)");
         }
@@ -254,6 +262,10 @@ public final class Cli {
             copyIfPresent(svc.resolve("graph.json"), syncDir.resolve(project + ".json"));
             copyIfPresent(svc.resolve("openapi.json"), syncDir.resolve(project + ".openapi.json"));
             copyIfPresent(svc.resolve("impact.json"), syncDir.resolve(project + ".impact.json"));
+            copyIfPresent(svc.resolve("pulls.json"), syncDir.resolve(project + ".pulls.json"));
+            // lazy-load shard dirs keep their <project>.{impact,pulls}/ name (the index refs them so).
+            copyDirIfPresent(svc.resolve(project + ".impact"), syncDir.resolve(project + ".impact"));
+            copyDirIfPresent(svc.resolve(project + ".pulls"), syncDir.resolve(project + ".pulls"));
         }
         mergeManifest(outDir.resolve("_manifest.json"), syncDir.resolve("manifest.json"), built);
         System.out.println("  synced → " + syncDir + " (manifest.json + " + built.size() + " projects)");
@@ -262,6 +274,20 @@ public final class Cli {
     private static void copyIfPresent(Path src, Path dst) throws IOException {
         if (Files.isRegularFile(src)) {
             Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /** Mirror a shard directory (drop the dest first so stale shards don't linger), if the source exists. */
+    private static void copyDirIfPresent(Path src, Path dst) throws IOException {
+        if (!Files.isDirectory(src)) return;
+        deleteDirRecursive(dst);
+        Files.createDirectories(dst);
+        try (Stream<Path> s = Files.list(src)) {
+            for (Path f : (Iterable<Path>) s::iterator) {
+                if (Files.isRegularFile(f)) {
+                    Files.copy(f, dst.resolve(f.getFileName()), StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
         }
     }
 
@@ -297,6 +323,88 @@ public final class Cli {
     /** Per-service staging directory: {@code <out-dir>/service/<project>/}. */
     private static Path serviceDir(Path outDir, String project) {
         return outDir.resolve("service").resolve(project);
+    }
+
+    /**
+     * Generate the PR-based pulls + impact artifacts for one service into {@code svcDir},
+     * matching flowmap-spring's layout/schema. {@code svcBase} is the service name used for the
+     * shard-dir prefix and the pulls index {@code dir}; {@code graphFile} is the call graph the
+     * impact reverse-walk runs against (the per-module graph, or {@code _combined.json} for a
+     * monorepo). Writes bare {@code pulls.json}/{@code impact.json} (the staging sibling names the
+     * sync/manifest expect) plus {@code <svcBase>.pulls/}/{@code <svcBase>.impact/} shard dirs.
+     */
+    private static void generatePullsAndImpact(GitLog git, File repoFile, String svcBase,
+                                               Path svcDir, Path graphFile, int max) throws IOException {
+        Files.createDirectories(svcDir);
+        String base = git.resolveBranch(null);
+        List<GitHub.Pr> pulls = GitHub.mergedPulls(repoFile, base, max);
+        if (pulls == null) pulls = new ArrayList<>();   // neither git nor gh yielded PRs → treat as none
+        writePulls(repoFile, git, svcBase, svcDir, base, pulls);
+        PrImpact.Result res = PrImpact.analyze(git, base, pulls, graphFile);
+        JsonOutput.write(res.index, svcDir.resolve("impact.json"));
+        writeImpactShards(svcDir, svcBase, res.shards);
+    }
+
+    /** Write the {@code pulls.json} index (bare) + {@code <svcBase>.pulls/<n>.json} shards, pruning stale. */
+    private static void writePulls(File repoFile, GitLog git, String svcBase, Path svcDir,
+                                   String base, List<GitHub.Pr> pulls) throws IOException {
+        String webBase = git.webBaseUrl();
+        String shardDir = svcBase + ".pulls";
+        Path pdir = svcDir.resolve(shardDir);
+        List<Map<String, Object>> entries = new ArrayList<>();
+        Set<String> keep = new HashSet<>();
+        for (GitHub.Pr pr : pulls) {
+            List<GitHub.PrFile> files = GitHub.pullFiles(repoFile, pr);
+            if (files == null) files = new ArrayList<>();
+            Map<String, Object> shard = GitHub.buildShard(pr, files, webBase);
+            JsonOutput.write(shard, pdir.resolve(pr.number + ".json"));
+            keep.add(pr.number + ".json");
+            entries.add(GitHub.indexEntry(shard, shardDir));
+        }
+        JsonOutput.write(GitHub.pullIndexDoc(base, webBase, shardDir, entries), svcDir.resolve("pulls.json"));
+        pruneShardDir(pdir, keep);
+    }
+
+    /** Write the {@code <svcBase>.impact/<n>.json} shards, pruning ones not re-emitted this run. */
+    private static void writeImpactShards(Path svcDir, String svcBase,
+                                          Map<Integer, Map<String, Object>> shards) throws IOException {
+        Path dir = svcDir.resolve(svcBase + ".impact");
+        Set<String> keep = new HashSet<>();
+        for (Map.Entry<Integer, Map<String, Object>> e : shards.entrySet()) {
+            JsonOutput.write(e.getValue(), dir.resolve(e.getKey() + ".json"));
+            keep.add(e.getKey() + ".json");
+        }
+        pruneShardDir(dir, keep);
+    }
+
+    /** Remove {@code *.json} shards in {@code dir} not in {@code keep}; delete {@code dir} if empty. */
+    private static void pruneShardDir(Path dir, Set<String> keep) throws IOException {
+        if (!Files.isDirectory(dir)) return;
+        try (Stream<Path> s = Files.list(dir)) {
+            for (Path f : (Iterable<Path>) s::iterator) {
+                String name = f.getFileName().toString();
+                if (Files.isRegularFile(f) && name.endsWith(".json") && !keep.contains(name)) {
+                    Files.deleteIfExists(f);
+                }
+            }
+        }
+        try (Stream<Path> s = Files.list(dir)) {
+            if (s.findAny().isEmpty()) Files.deleteIfExists(dir);
+        }
+    }
+
+    /** Recursively delete a directory tree if present (clears a stale shard dir before a rewrite). */
+    private static void deleteDirRecursive(Path dir) throws IOException {
+        if (!Files.exists(dir)) return;
+        try (Stream<Path> s = Files.walk(dir)) {
+            s.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (IOException ignore) {
+                    // best-effort
+                }
+            });
+        }
     }
 
     /**
