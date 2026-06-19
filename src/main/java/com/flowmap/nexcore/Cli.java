@@ -194,6 +194,8 @@ public final class Cli {
             //   service 는 노드 project(=모듈)라 웹이 모듈 단위로 귀속한다.
             Path repoSvc = serviceDir(outDir, gitRepoMark);
             Files.createDirectories(repoSvc);
+            // 이전(모듈별) 실행이 남긴 모듈 impact.json 은 제거 — repo 단위 1벌만 남겨 중복/스테일을 막는다.
+            for (String project : built) Files.deleteIfExists(serviceDir(outDir, project).resolve("impact.json"));
             LinkedHashMap<String, Object> result = Impact.run(git,
                     outDir.resolve("_combined.json"), null, impactMax, impactDepth, null);
             JsonOutput.write(result, repoSvc.resolve("impact.json"));
