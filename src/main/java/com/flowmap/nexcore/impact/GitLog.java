@@ -208,6 +208,18 @@ public final class GitLog {
     }
 
     /**
+     * Git namespace (owner) of this repo's {@code origin} remote — the second-to-last path
+     * segment of the normalized web base — or null when there is no usable remote. Used as the
+     * top level of the output layout {@code projects/<namespace>/<repo>/<perRoot>/}.
+     */
+    public String namespace() {
+        String web = toWebBase(remoteUrl());
+        if (web == null) return null;
+        String[] segs = web.replaceFirst("^https://", "").split("/");
+        return segs.length >= 3 ? segs[segs.length - 2] : null;   // [host, owner..., repo]
+    }
+
+    /**
      * Normalize a git remote URL to its https web base (no trailing {@code .git}),
      * handling scp-style ({@code git@host:owner/repo.git}), {@code ssh://}, and
      * {@code http(s)://} forms and stripping embedded credentials. Pure (no git call).
