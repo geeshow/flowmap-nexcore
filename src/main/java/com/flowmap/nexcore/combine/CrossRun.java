@@ -61,8 +61,10 @@ public final class CrossRun {
             if (parts.length < 2) continue;
             String unit = parts[parts.length - 2];
             String method = parts[parts.length - 1];
-            String suffix = "." + unit + "#" + method;
-            String realId = findReal(nodes.keySet(), suffix);
+            // nearest comp segment (e.g. `acgo0002` in `ac.acgo0002.FAC0011.fAC0011`), a hint to
+            // disambiguate when several projects expose the same <Unit>#<method> suffix.
+            String comp = parts.length >= 3 ? parts[parts.length - 3] : null;
+            String realId = findReal(nodes.keySet(), unit, method, comp);
             if (realId != null) {
                 edge.put("target", realId);
                 edge.put("kind", "s2s");
@@ -114,12 +116,24 @@ public final class CrossRun {
         return out;
     }
 
-    private static String findReal(Set<String> ids, String suffix) {
+    /**
+     * Resolve a shared-call placeholder to its real provider node by {@code .<Unit>#<method>}
+     * suffix. When the {@code comp} hint matches a candidate's id, that wins immediately. Without
+     * a comp hit only an <em>unambiguous</em> single suffix match is accepted — multiple matches
+     * with no comp tie-break stay external, avoiding a wrong cross-project {@code s2s} edge.
+     */
+    private static String findReal(Set<String> ids, String unit, String method, String comp) {
+        String suffix = "." + unit + "#" + method;
+        String picked = null;
+        int matches = 0;
         for (String id : ids) {
             if (id.startsWith("ext:") || id.startsWith("db:") || id.startsWith("kafka:")) continue;
-            if (id.endsWith(suffix)) return id;
+            if (!id.endsWith(suffix)) continue;
+            if (comp != null && id.contains("." + comp + ".")) return id; // comp disambiguates
+            if (picked == null) picked = id;
+            matches++;
         }
-        return null;
+        return matches == 1 ? picked : null;
     }
 
     /** Bare transaction token (a node's {@code aliases}) → real node id, for real (non-ext) nodes. */

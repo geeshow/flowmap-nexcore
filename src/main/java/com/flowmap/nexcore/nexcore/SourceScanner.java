@@ -11,15 +11,26 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.stream.Stream;
 
 /**
  * Walks a NEXCORE source tree, parses {@code *.java} with JavaParser and indexes
  * {@code *.xsql} SQL maps. Recognises units by base class (ProcessUnit/FunctionUnit/
  * DataUnit) and batch jobs by {@code MBBatchComponent}/{@code @BizBatch}.
+ *
+ * <p>A unit's base is matched even when it sits behind an abstract framework layer
+ * ({@code FCA0049 extends AbstractFunctionUnit extends FunctionUnit}): the direct
+ * super is matched by name suffix ({@code *FunctionUnit}) and, failing that, the
+ * super chain is followed across the scan ({@code superIndex}). Missing this is the
+ * root cause of shared-call targets staying {@code ext:SHARED#} (external) instead of
+ * resolving to real {@code s2s} edges — the unit was never indexed.
  */
 public final class SourceScanner {
 
@@ -56,6 +67,10 @@ public final class SourceScanner {
         Path root = project == null ? repoRoot : repoRoot.resolve(project);
         if (!Files.isDirectory(root)) return scan;
         JavaParser parser = newParser();
+        // Pass 1: parse every .java, collecting candidate classes and a repo-wide
+        // simpleName → direct-super-simpleName index so the super chain can be followed.
+        List<Candidate> candidates = new ArrayList<>();
+        Map<String, String> superIndex = new HashMap<>();
         try (Stream<Path> walk = Files.walk(root)) {
             List<Path> files = new ArrayList<>();
             walk.filter(Files::isRegularFile).forEach(files::add);
@@ -65,16 +80,51 @@ public final class SourceScanner {
                     String base = name.substring(0, name.length() - ".xsql".length());
                     scan.xsql.put(base, XsqlParser.parse(p));
                 } else if (name.endsWith(".java")) {
-                    parseJava(scan, repoRoot, p, parser);
+                    parseJava(scan, repoRoot, p, parser, candidates, superIndex);
                 }
             }
         } catch (IOException e) {
             throw new RuntimeException("Failed to scan " + root, e);
         }
+        // Pass 2: classify by base, resolving abstract framework layers transitively.
+        Map<String, Integer> skippedSupers = new TreeMap<>();
+        for (Candidate c : candidates) {
+            UnitClass uc = classify(c, superIndex, skippedSupers);
+            if (uc != null) scan.units.add(uc);
+        }
+        if (!skippedSupers.isEmpty()) {
+            // Diagnostics: supers that looked unit-like context but resolved to no base. A unit
+            // base appearing here (high count) signals an unrecognised framework layer to add.
+            String top = skippedSupers.entrySet().stream()
+                    .sorted((a, b) -> b.getValue() - a.getValue()).limit(8)
+                    .map(e -> e.getKey() + "×" + e.getValue())
+                    .reduce((a, b) -> a + ", " + b).orElse("");
+            System.err.println("[scan] " + (project == null ? "<repo>" : project)
+                    + ": units=" + scan.units.size() + ", skipped supers=[" + top + "]");
+        }
         return scan;
     }
 
-    private static void parseJava(Scan scan, Path repoRoot, Path file, JavaParser parser) {
+    /** A parsed concrete class awaiting base classification in pass 2. */
+    private static final class Candidate {
+        final ClassOrInterfaceDeclaration cls;
+        final String pkg;
+        final String rel;
+        final String superSimple;
+        final boolean bizBatch;
+
+        Candidate(ClassOrInterfaceDeclaration cls, String pkg, String rel,
+                  String superSimple, boolean bizBatch) {
+            this.cls = cls;
+            this.pkg = pkg;
+            this.rel = rel;
+            this.superSimple = superSimple;
+            this.bizBatch = bizBatch;
+        }
+    }
+
+    private static void parseJava(Scan scan, Path repoRoot, Path file, JavaParser parser,
+                                  List<Candidate> candidates, Map<String, String> superIndex) {
         String rel = rel(repoRoot, file);
         scan.javaFiles.put(rel, file);
         ParseResult<CompilationUnit> res;
@@ -88,40 +138,80 @@ public final class SourceScanner {
         String pkg = cu.getPackageDeclaration().map(pd -> pd.getNameAsString()).orElse("");
         for (ClassOrInterfaceDeclaration cls : cu.findAll(ClassOrInterfaceDeclaration.class)) {
             if (cls.isInterface()) continue;
-            UnitClass uc = classify(cls, pkg, rel, repoRoot);
-            if (uc != null) scan.units.add(uc);
+            String superSimple = directSuper(cls);
+            // index EVERY class (incl. abstract framework bases) so the chain can be followed
+            superIndex.putIfAbsent(cls.getNameAsString(), superSimple);
+            if (cls.isAbstract()) continue; // abstract = framework base, never a concrete unit node
+            boolean bizBatch = cls.getAnnotations().stream()
+                    .anyMatch(a -> a.getNameAsString().equals(NexcoreModel.BIZ_BATCH_SIMPLE)
+                            || a.getNameAsString().endsWith(".BizBatch"));
+            candidates.add(new Candidate(cls, pkg, rel, superSimple, bizBatch));
         }
     }
 
-    private static UnitClass classify(ClassOrInterfaceDeclaration cls, String pkg, String rel, Path repoRoot) {
+    private static UnitClass classify(Candidate c, Map<String, String> superIndex,
+                                      Map<String, Integer> skippedSupers) {
+        ClassOrInterfaceDeclaration cls = c.cls;
         String simple = cls.getNameAsString();
-        String fqcn = pkg.isEmpty() ? simple : pkg + "." + simple;
-        String project = projectOf(rel);
-        String module = moduleOf(pkg);
+        String fqcn = c.pkg.isEmpty() ? simple : c.pkg + "." + simple;
+        String project = projectOf(c.rel);
+        String module = moduleOf(c.pkg);
 
-        String superSimple = null;
-        for (ClassOrInterfaceType ext : cls.getExtendedTypes()) {
-            superSimple = simpleOf(ext.getNameWithScope());
-            break;
-        }
-        boolean bizBatch = cls.getAnnotations().stream()
-                .anyMatch(a -> a.getNameAsString().equals(NexcoreModel.BIZ_BATCH_SIMPLE)
-                        || a.getNameAsString().endsWith(".BizBatch"));
-
+        String base = resolveBase(c.superSimple, superIndex);
         NexcoreModel.NodeType type = null;
         boolean batch = false;
-        if ("ProcessUnit".equals(superSimple)) {
+        if ("ProcessUnit".equals(base)) {
             type = NexcoreModel.NodeType.PM;
-        } else if ("FunctionUnit".equals(superSimple)) {
+        } else if ("FunctionUnit".equals(base)) {
             type = NexcoreModel.NodeType.FM;
-        } else if ("DataUnit".equals(superSimple)) {
+        } else if ("DataUnit".equals(base)) {
             type = NexcoreModel.NodeType.DM;
-        } else if (NexcoreModel.MB_BATCH_SIMPLE.equals(superSimple) || bizBatch) {
+        } else if (NexcoreModel.MB_BATCH_SIMPLE.equals(base) || c.bizBatch) {
             type = NexcoreModel.NodeType.BATCH_JOB;
             batch = true;
         }
-        if (type == null) return null; // not a unit/batch class
-        return new UnitClass(simple, fqcn, pkg, rel, project, module, type, batch, cls);
+        if (type == null) {
+            if (c.superSimple != null) skippedSupers.merge(c.superSimple, 1, Integer::sum);
+            return null; // not a unit/batch class
+        }
+        return new UnitClass(simple, fqcn, c.pkg, c.rel, project, module, type, batch, cls);
+    }
+
+    /**
+     * Resolve a class's unit base ({@code ProcessUnit}/{@code FunctionUnit}/{@code DataUnit}/
+     * {@code MBBatchComponent}) from its direct super, transparently crossing abstract framework
+     * layers. At each hop the name is matched by suffix ({@code AbstractFunctionUnit} →
+     * {@code FunctionUnit}) — which works even when the intermediate is out of scan scope — and,
+     * failing that, the super chain is followed via {@code superIndex}. Null = not a unit.
+     */
+    private static String resolveBase(String superSimple, Map<String, String> superIndex) {
+        String cur = superSimple;
+        Set<String> seen = new HashSet<>();
+        while (cur != null && seen.add(cur)) {
+            String m = matchBaseName(cur);
+            if (m != null) return m;
+            cur = superIndex.get(cur);
+        }
+        return null;
+    }
+
+    /** Map a super simple-name to a known unit base by exact match or name suffix, else null. */
+    private static String matchBaseName(String name) {
+        if (name == null) return null;
+        if (name.equals("ProcessUnit") || name.endsWith("ProcessUnit")) return "ProcessUnit";
+        if (name.equals("FunctionUnit") || name.endsWith("FunctionUnit")) return "FunctionUnit";
+        if (name.equals("DataUnit") || name.endsWith("DataUnit")) return "DataUnit";
+        if (name.equals(NexcoreModel.MB_BATCH_SIMPLE) || name.endsWith("BatchComponent")) {
+            return NexcoreModel.MB_BATCH_SIMPLE;
+        }
+        return null;
+    }
+
+    private static String directSuper(ClassOrInterfaceDeclaration cls) {
+        for (ClassOrInterfaceType ext : cls.getExtendedTypes()) {
+            return simpleOf(ext.getNameWithScope());
+        }
+        return null;
     }
 
     // ---------- helpers ----------
