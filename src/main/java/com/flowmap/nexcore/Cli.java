@@ -38,11 +38,11 @@ import java.util.stream.Stream;
  * {@code analyze} · {@code combine} · {@code openapi} · {@code impact} · {@code refresh} · {@code sync}.
  * With no args, reads {@code flowmap.config}.
  *
- * <p>Per-project artifacts live under a per-service directory:
- * {@code <out-dir>/service/<service>/graph.json} (+ {@code openapi.json} / {@code impact.json}).
- * The {@code _combined.json} / {@code _openapi.json} / {@code _manifest.json} aggregates stay at
- * the {@code out-dir} root. {@code sync} flattens the per-service tree into the web data dir
- * (one flat {@code <service>.json} / {@code .openapi.json} / {@code .impact.json} per project).
+ * <p>Per-project artifacts live under a nested per-service directory:
+ * {@code <out-dir>/projects/<namespace>/<repo>/<perRoot>/graph.json} (+ {@code openapi.json} /
+ * {@code impact.json}). The {@code _combined.json} / {@code _openapi.json} / {@code _manifest.json}
+ * aggregates stay at the {@code out-dir} root. {@code sync} mirrors the nested per-service tree into
+ * the web data dir, renaming inner files to {@code <perRoot>.json} / {@code .openapi.json} / etc.
  */
 public final class Cli {
 
@@ -160,22 +160,26 @@ public final class Cli {
         SourceScanner.Scan all = SourceScanner.scan(repo, null);
         com.flowmap.nexcore.nexcore.UnitIndex global = new com.flowmap.nexcore.nexcore.UnitIndex(all);
 
-        // 모노레포 판정: 한 git repo 아래 모듈(=project) 2개 이상이면 pulls/impact 를 repo 단위 1벌로 둔다.
-        //   gitRepoMark(=git work-tree 이름)를 각 모듈 그래프 meta.gitRepo 에 찍어 두면, sync(spring/nexcore)
-        //   가 manifest 의 repo 필드로 출력하고 웹이 모듈↔repo 를 잇는다. (단일 모듈이면 standalone 유지)
+        // NEXCORE 는 프로젝트(=모듈)마다 독립 git repo 인 환경 — manifest 의 repo 를 프로젝트명과
+        //   일치(repo===name)시킨다. 물리적으로 한 work-tree 아래 함께 있어도 도메인상 각자 별도 repo 라
+        //   standalone 으로 취급한다: gitRepo 마커를 프로젝트명으로 찍고, pulls/impact 도 프로젝트별 1벌로
+        //   둔다(모노레포 repo 단위 1벌 집계는 쓰지 않음).
         GitLog git = new GitLog(repo);
         boolean isGit = git.isGitRepo();
+        // namespace: origin owner when a remote exists, else the work-tree basename (e.g. "nexcore").
+        // repo===perRoot===project (each bizunit is treated as its own standalone repo).
+        String namespace = git.namespace();
+        if (namespace == null) namespace = git.repoName();
         List<String> projects = discoverProjects(repo);
-        String gitRepoMark = (isGit && projects.size() >= 2) ? git.repoName() : null;
 
         List<String> built = new ArrayList<>();
         for (String project : projects) {
             SourceScanner.Scan scan = SourceScanner.scan(repo, project);
             if (scan.units.isEmpty()) continue; // no ghost graphs
             CallGraph graph = GraphBuilder.buildProject(global, project);
-            Path svc = serviceDir(outDir, project);
+            Path svc = serviceDir(outDir, namespace, project, project);
             Map<String, Object> meta = analyzeMeta(repo.toString(), project, scan, graph);
-            if (gitRepoMark != null) meta.put("gitRepo", gitRepoMark);   // 모노레포 마커
+            if (isGit) { meta.put("gitNamespace", namespace); meta.put("gitRepo", project); }   // → manifest.namespace/repo
             JsonOutput.write(graph.toNodeLink(meta), svc.resolve("graph.json"));
             LinkedHashMap<String, Object> doc = OpenApi.generate(scan, repo, project, "1.0.0");
             JsonOutput.write(doc, svc.resolve("openapi.json"));
@@ -192,28 +196,11 @@ public final class Cli {
         // impact + pulls (needs git history). PR-based, per-service — identical file paths and
         // schema to flowmap-spring: <svc>.pulls.json + <svc>.pulls/<n>.json and
         // <svc>.impact.json (bare impact.json staging name) + <svc>.impact/<n>.json shards.
-        boolean monorepo = gitRepoMark != null && built.size() >= 2 && !built.contains(gitRepoMark);
-        if (doImpact && isGit && monorepo) {
-            // 모노레포: 합쳐진 그래프(_combined.json)로 repo 단위 pulls/impact 1벌 → service/<repo>/.
-            //   (graph 없는 repo 엔트리). PR 은 repo 전체에서 1번씩만 집계되고, impactedEndpoints 의
-            //   service 는 노드 project(=모듈)라 웹이 모듈 단위로 귀속한다. (spring 모노레포와 동일)
-            Path repoSvc = serviceDir(outDir, gitRepoMark);
-            Files.createDirectories(repoSvc);
-            // 이전(모듈별) 실행이 남긴 모듈 pulls/impact 는 제거 — repo 단위 1벌만 남긴다.
+        //   각 프로젝트가 독립 repo 이므로 항상 프로젝트별 1벌(standalone)로 집계한다. 한 work-tree 의
+        //   PR 이라도 변경 파일이 그 프로젝트 그래프 노드와 닿는 것만 impact 로 귀속된다.
+        if (doImpact && isGit) {
             for (String project : built) {
-                Path p = serviceDir(outDir, project);
-                Files.deleteIfExists(p.resolve("impact.json"));
-                Files.deleteIfExists(p.resolve("pulls.json"));
-                deleteDirRecursive(p.resolve(project + ".impact"));
-                deleteDirRecursive(p.resolve(project + ".pulls"));
-            }
-            generatePullsAndImpact(git, repo.toFile(), gitRepoMark, repoSvc,
-                    outDir.resolve("_combined.json"), impactMax);
-            built.add(gitRepoMark);   // sync/manifest 가 repo 엔트리(pulls/impact 전용)를 포함하도록
-            System.out.println("  pulls/impact analyzed (repo-level: " + gitRepoMark + ")");
-        } else if (doImpact && isGit) {
-            for (String project : built) {
-                Path svc = serviceDir(outDir, project);
+                Path svc = serviceDir(outDir, namespace, project, project);
                 generatePullsAndImpact(git, repo.toFile(), project, svc, svc.resolve("graph.json"), impactMax);
             }
             System.out.println("  pulls/impact analyzed (" + built.size() + " projects)");
@@ -257,15 +244,19 @@ public final class Cli {
      */
     private static void syncToWeb(Path outDir, Path syncDir, List<String> built) throws IOException {
         Files.createDirectories(syncDir);
-        for (String project : built) {
-            Path svc = serviceDir(outDir, project);
-            copyIfPresent(svc.resolve("graph.json"), syncDir.resolve(project + ".json"));
-            copyIfPresent(svc.resolve("openapi.json"), syncDir.resolve(project + ".openapi.json"));
-            copyIfPresent(svc.resolve("impact.json"), syncDir.resolve(project + ".impact.json"));
-            copyIfPresent(svc.resolve("pulls.json"), syncDir.resolve(project + ".pulls.json"));
-            // lazy-load shard dirs keep their <project>.{impact,pulls}/ name (the index refs them so).
-            copyDirIfPresent(svc.resolve(project + ".impact"), syncDir.resolve(project + ".impact"));
-            copyDirIfPresent(svc.resolve(project + ".pulls"), syncDir.resolve(project + ".pulls"));
+        Path projectsRoot = outDir.resolve("projects");
+        for (Path leaf : leafProjectDirs(outDir)) {
+            String perRoot = leaf.getFileName().toString();
+            String rel = projectsRoot.relativize(leaf).toString().replace(File.separatorChar, '/');
+            Path destPdir = syncDir.resolve("projects").resolve(rel);
+            Files.createDirectories(destPdir);
+            copyIfPresent(leaf.resolve("graph.json"), destPdir.resolve(perRoot + ".json"));
+            copyIfPresent(leaf.resolve("openapi.json"), destPdir.resolve(perRoot + ".openapi.json"));
+            copyIfPresent(leaf.resolve("impact.json"), destPdir.resolve(perRoot + ".impact.json"));
+            copyIfPresent(leaf.resolve("pulls.json"), destPdir.resolve(perRoot + ".pulls.json"));
+            // lazy-load shard dirs keep their <perRoot>.{impact,pulls}/ name (the index refs them so).
+            copyDirIfPresent(leaf.resolve(perRoot + ".impact"), destPdir.resolve(perRoot + ".impact"));
+            copyDirIfPresent(leaf.resolve(perRoot + ".pulls"), destPdir.resolve(perRoot + ".pulls"));
         }
         mergeManifest(outDir.resolve("_manifest.json"), syncDir.resolve("manifest.json"), built);
         System.out.println("  synced → " + syncDir + " (manifest.json + " + built.size() + " projects)");
@@ -320,17 +311,44 @@ public final class Cli {
 
     // ---------- helpers ----------
 
-    /** Per-service staging directory: {@code <out-dir>/service/<project>/}. */
-    private static Path serviceDir(Path outDir, String project) {
-        return outDir.resolve("service").resolve(project);
+    /** Per-service staging directory: {@code <out-dir>/projects/<namespace>/<repo>/<perRoot>/}. */
+    private static Path serviceDir(Path outDir, String namespace, String repo, String perRoot) {
+        return outDir.resolve("projects").resolve(namespace).resolve(repo).resolve(perRoot);
+    }
+
+    /**
+     * Leaf project dirs under {@code <outDir>/projects} (nested {@code <ns>/<repo>/<perRoot>}):
+     * any dir directly holding a {@code .json} artifact. Skips {@code .pulls}/{@code .impact} shard dirs.
+     */
+    private static List<Path> leafProjectDirs(Path outDir) throws IOException {
+        Path root = outDir.resolve("projects");
+        List<Path> out = new ArrayList<>();
+        collectLeaves(root, out);
+        out.sort(java.util.Comparator.comparing(p -> p.getFileName().toString()));
+        return out;
+    }
+
+    private static void collectLeaves(Path d, List<Path> out) throws IOException {
+        if (!Files.isDirectory(d)) return;
+        List<Path> children;
+        try (Stream<Path> s = Files.list(d)) {
+            children = s.collect(java.util.stream.Collectors.toList());
+        }
+        boolean hasJson = children.stream()
+                .anyMatch(c -> Files.isRegularFile(c) && c.getFileName().toString().endsWith(".json"));
+        if (hasJson) out.add(d);
+        for (Path c : children) {
+            String n = c.getFileName().toString();
+            if (Files.isDirectory(c) && !n.endsWith(".pulls") && !n.endsWith(".impact")) collectLeaves(c, out);
+        }
     }
 
     /**
      * Generate the PR-based pulls + impact artifacts for one service into {@code svcDir},
      * matching flowmap-spring's layout/schema. {@code svcBase} is the service name used for the
      * shard-dir prefix and the pulls index {@code dir}; {@code graphFile} is the call graph the
-     * impact reverse-walk runs against (the per-module graph, or {@code _combined.json} for a
-     * monorepo). Writes bare {@code pulls.json}/{@code impact.json} (the staging sibling names the
+     * impact reverse-walk runs against (the per-project graph). Writes bare
+     * {@code pulls.json}/{@code impact.json} (the staging sibling names the
      * sync/manifest expect) plus {@code <svcBase>.pulls/}/{@code <svcBase>.impact/} shard dirs.
      */
     private static void generatePullsAndImpact(GitLog git, File repoFile, String svcBase,
@@ -408,20 +426,14 @@ public final class Cli {
     }
 
     /**
-     * Project names present in the staging tree — dirs with a {@code graph.json} (modules) OR
-     * with only an {@code impact.json} (graph-less repo-level impact unit for a monorepo).
+     * Project names present in the staging tree — dirs with a {@code graph.json} (projects) OR
+     * with only an {@code impact.json} (graph-less impact-only unit, defensive — not normally emitted).
      */
     private static List<String> builtProjects(Path outDir) throws IOException {
         List<String> out = new ArrayList<>();
-        Path serviceRoot = outDir.resolve("service");
-        if (!Files.isDirectory(serviceRoot)) return out;
-        try (Stream<Path> s = Files.list(serviceRoot)) {
-            s.filter(Files::isDirectory)
-                    .filter(d -> Files.isRegularFile(d.resolve("graph.json"))
-                            || Files.isRegularFile(d.resolve("impact.json")))
-                    .map(d -> d.getFileName().toString())
-                    .sorted()
-                    .forEach(out::add);
+        for (Path leaf : leafProjectDirs(outDir)) {
+            if (Files.isRegularFile(leaf.resolve("graph.json")) || Files.isRegularFile(leaf.resolve("impact.json")))
+                out.add(leaf.getFileName().toString());
         }
         return out;
     }
@@ -441,14 +453,9 @@ public final class Cli {
 
     private static List<Path> graphFiles(Path dir) throws IOException {
         List<Path> out = new ArrayList<>();
-        Path serviceRoot = dir.resolve("service");
-        if (!Files.isDirectory(serviceRoot)) return out;
-        try (Stream<Path> s = Files.list(serviceRoot)) {
-            s.filter(Files::isDirectory)
-                    .map(d -> d.resolve("graph.json"))
-                    .filter(Files::isRegularFile)
-                    .sorted()
-                    .forEach(out::add);
+        for (Path leaf : leafProjectDirs(dir)) {
+            Path g = leaf.resolve("graph.json");
+            if (Files.isRegularFile(g)) out.add(g);
         }
         return out;
     }
