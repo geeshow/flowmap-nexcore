@@ -76,10 +76,22 @@ public final class PrImpact {
         Set<String> allImpacted = new LinkedHashSet<>();
 
         for (GitHub.Pr pr : pulls) {
-            if (pr.mergeCommit == null) continue;
-            String sha = pr.mergeCommit;
-            String parent = git.firstParent(sha);
-            List<GitLog.FileChange> changes = git.changesIn(sha);
+            // Analyzed revision: merged PR → its merge/squash commit; open PR → its (fetched) head.
+            String sha = pr.analyzedCommit();
+            if (sha == null) continue;
+            // Base side of the net diff: open PR → merge-base(base branch, head) so commits already on
+            //   the base branch are excluded; merged PR → first parent (the pre-merge base). When the
+            //   open PR head isn't available locally (fetch failed / no remote), the diff comes back
+            //   empty and the PR still appears in the list with zero impacted endpoints.
+            String parent;
+            List<GitLog.FileChange> changes;
+            if (pr.isOpen()) {
+                parent = git.mergeBase(base, sha);
+                changes = git.changesBetween(parent != null ? parent : base, sha);
+            } else {
+                parent = git.firstParent(sha);
+                changes = git.changesIn(sha);
+            }
 
             LinkedHashMap<String, Fn> changedFns = new LinkedHashMap<>();   // id -> first-seen range
             LinkedHashSet<String> deletedIds = new LinkedHashSet<>();
@@ -153,6 +165,8 @@ public final class PrImpact {
             row.put("title", pr.title);
             row.put("author", pr.author);
             row.put("mergedAt", pr.mergedAt);
+            row.put("updatedAt", pr.updatedAt);
+            row.put("status", pr.status);
             row.put("mergeCommit", sha);
             row.put("changedNodeCount", changedFns.size());
             row.put("changedFileCount", changes.size());
@@ -166,6 +180,7 @@ public final class PrImpact {
             for (GitLog.FileChange ch : changes) changedFiles.add(ch.path);
             Map<String, Object> shard = new LinkedHashMap<>();
             shard.put("number", pr.number);
+            shard.put("status", pr.status);
             shard.put("mergeCommit", sha);
             shard.put("changedFiles", changedFiles);
             shard.put("changedNodes", changedNodes);

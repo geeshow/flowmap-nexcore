@@ -192,6 +192,55 @@ public final class GitLog {
         }
     }
 
+    /**
+     * Best common ancestor of {@code a} and {@code b} — the base side of an OPEN PR's net change
+     * ({@code merge-base(<branch>, <head>)}), so the diff excludes commits already on the base
+     * branch. Null when either ref is unknown.
+     */
+    public String mergeBase(String a, String b) {
+        try {
+            String s = run("merge-base", a, b).trim();
+            return s.isEmpty() ? null : s;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** True when {@code sha} resolves to a commit present locally (e.g. after fetching a PR head). */
+    public boolean hasCommit(String sha) {
+        if (sha == null || sha.isBlank()) return false;
+        try {
+            return !run("rev-parse", "--verify", "--quiet", sha + "^{commit}").trim().isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Fetch an open PR's head into the local object store ({@code git fetch origin pull/<n>/head})
+     * so its blobs/diff are available offline to the impact walk. Best-effort: returns true only
+     * when the head commit is present afterwards (works on GitHub/GHE; no-op without a usable remote).
+     */
+    public boolean fetchPullHead(int number, String headOid) {
+        try {
+            run("fetch", "--quiet", "origin", "pull/" + number + "/head");
+        } catch (Exception ignore) {
+            // best-effort; fall through to the presence check
+        }
+        return hasCommit(headOid);
+    }
+
+    /** New-side changed files + line ranges for {@code base..head} (rename-aware), like {@link #changesIn}. */
+    public List<FileChange> changesBetween(String base, String head) {
+        String diff;
+        try {
+            diff = run("diff", base, head, "-U0", "-M", "--no-color");
+        } catch (Exception e) {
+            return new ArrayList<>();
+        }
+        return parseDiff(diff);
+    }
+
     /** The {@code origin} remote URL, or null if there is no {@code origin} remote. */
     public String remoteUrl() {
         try {

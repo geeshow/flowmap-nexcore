@@ -391,6 +391,13 @@ public final class Cli {
         String base = git.resolveBranch(null);
         List<GitHub.Pr> pulls = GitHub.mergedPulls(repoFile, base, max);
         if (pulls == null) pulls = new ArrayList<>();   // neither git nor gh yielded PRs → treat as none
+        // Open (incl. draft) PRs targeting the same base. gh-only — empty without a remote (e.g. the
+        //   nexcore sample). Fetch each head so the impact walk can read its blobs offline.
+        List<GitHub.Pr> open = GitHub.openPulls(repoFile, base, max);
+        for (GitHub.Pr pr : open) {
+            if (pr.headOid != null) git.fetchPullHead(pr.number, pr.headOid);
+        }
+        pulls.addAll(open);
         writePulls(repoFile, git, svcBase, svcDir, base, pulls);
         PrImpact.Result res = PrImpact.analyze(git, base, pulls, graphFile);
         JsonOutput.write(res.index, svcDir.resolve("impact.json"));
