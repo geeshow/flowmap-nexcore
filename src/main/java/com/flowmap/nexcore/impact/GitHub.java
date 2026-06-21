@@ -173,7 +173,13 @@ public final class GitHub {
             args.add(base);
         }
         Exec r = gh(repo, args);
-        if (r.code != 0) return new ArrayList<>();   // no gh / no remote → simply no open PRs
+        if (r.code != 0) {
+            // gh 가 없거나 GHE 호스트 미인증이면 open PR 은 절대 못 가져옴(로컬 git 으론 불가능).
+            // silent 로 비우면 사용자가 인증 누락을 모르므로 한 줄 경고를 남긴다.
+            System.err.println("  open PRs skipped for " + repo.getName()
+                    + " (gh exit " + r.code + " — gh missing or not authenticated for the remote host?)");
+            return new ArrayList<>();
+        }
         return parseOpen(r.out);
     }
 
