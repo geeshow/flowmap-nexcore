@@ -36,8 +36,12 @@ import java.util.stream.Stream;
 
 /**
  * Command-line front end. Mirrors flowmap-spring's commands:
- * {@code analyze} · {@code combine} · {@code openapi} · {@code impact} · {@code refresh} · {@code sync}.
+ * {@code analyze} · {@code combine} · {@code openapi} · {@code impact} · {@code refresh} ·
+ * {@code pulls} · {@code sync}.
  * With no args, reads {@code flowmap.config}.
+ *
+ * <p>{@code refresh} does code analysis AND PR-based pulls/impact in one pass; {@code pulls}
+ * regenerates ONLY the pulls/impact artifacts against the existing graphs (no re-scan).</p>
  *
  * <p>Per-project artifacts live under a nested per-service directory:
  * {@code <out-dir>/projects/<namespace>/<repo>/<perRoot>/graph.json} (+ {@code openapi.json} /
@@ -66,10 +70,11 @@ public final class Cli {
             case "openapi": openapi(args); break;
             case "impact": impact(args); break;
             case "refresh": refresh(args); break;
+            case "pulls": pulls(args); break;
             case "sync": sync(args); break;
             default:
                 System.err.println("Unknown command: " + args.command
-                        + " (analyze|combine|openapi|impact|refresh|sync)");
+                        + " (analyze|combine|openapi|impact|refresh|pulls|sync)");
         }
     }
 
@@ -249,6 +254,68 @@ public final class Cli {
         if (syncDir != null) syncToWeb(outDir, Path.of(syncDir), built);
 
         System.out.println("refresh complete → " + outDir + " (" + built.size() + " projects)");
+    }
+
+    // ---------- pulls (PR-based pulls/impact only; reuses existing graphs) ----------
+
+    /**
+     * Regenerate ONLY the PR-based pulls/impact artifacts ({@code pulls.json} + {@code impact.json}
+     * and their shards) for projects already analyzed into the staging tree — WITHOUT re-scanning
+     * source or rebuilding call graphs. Reads each existing
+     * {@code projects/<ns>/<repo>/<perRoot>/graph.json} and mines its git history (merged + open PRs),
+     * then rewrites the manifest. Use to refresh PRs (incl. newly-opened ones) when the code graph
+     * is unchanged — much cheaper than a full {@code refresh}.
+     *
+     * <p>Options: {@code --repo} (git work-tree root), {@code --out-dir} (staging tree),
+     * {@code --impact-max}, {@code --project <perRoot>} (limit to one), {@code --sync-dir} (flatten
+     * into the web data dir afterwards). The git work-tree per project mirrors {@code refresh}: the
+     * project's own {@code .git} if present, else the shared work-tree — so blob paths match the
+     * graph the same way.</p>
+     */
+    private static void pulls(Args args) throws IOException {
+        Path repo = Path.of(args.get("repo", DEFAULT_REPO));
+        Path outDir = Path.of(args.get("out-dir", DEFAULT_OUT_DIR));
+        int impactMax = args.getInt("impact-max", 50);
+        String only = args.get("project");   // optional: restrict to a single perRoot
+
+        List<Path> svcDirs = new ArrayList<>();
+        for (Path d : leafProjectDirs(outDir)) {
+            if (Files.isRegularFile(d.resolve("graph.json"))) svcDirs.add(d);
+        }
+        if (svcDirs.isEmpty()) {
+            System.err.println("pulls: no graphs under " + outDir.resolve("projects")
+                    + " — run `refresh` first");
+            return;
+        }
+
+        int analyzed = 0;
+        for (Path svc : svcDirs) {
+            String project = svc.getFileName().toString();
+            if (only != null && !only.equals(project)) continue;
+            // Same git-root selection as refresh: the project's own .git, else the shared work-tree.
+            Path projRoot = repo.resolve(project);
+            Path gitRoot = Files.exists(projRoot.resolve(".git")) ? projRoot : repo;
+            GitLog pg = new GitLog(gitRoot);
+            if (!pg.isGitRepo()) {
+                System.err.println("  · " + project + ": skip — " + gitRoot + " is not a git repository");
+                continue;
+            }
+            generatePullsAndImpact(pg, gitRoot.toFile(), project, svc, svc.resolve("graph.json"), impactMax);
+            analyzed++;
+            System.out.println("  pulls/impact → " + project);
+        }
+        if (only != null && analyzed == 0) {
+            System.err.println("pulls: project '" + only + "' has no graph under " + outDir.resolve("projects"));
+            return;
+        }
+
+        Manifest.write(outDir);
+
+        // optional: flatten into the web data dir (manifest + per-project files), like refresh/sync.
+        String syncDir = args.get("sync-dir");
+        if (syncDir != null) syncToWeb(outDir, Path.of(syncDir), builtProjects(outDir));
+
+        System.out.println("pulls complete → " + outDir + " (" + analyzed + " projects)");
     }
 
     // ---------- sync ----------
