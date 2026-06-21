@@ -160,16 +160,19 @@ public final class Cli {
         SourceScanner.Scan all = SourceScanner.scan(repo, null);
         com.flowmap.nexcore.nexcore.UnitIndex global = new com.flowmap.nexcore.nexcore.UnitIndex(all);
 
-        // NEXCORE 는 프로젝트(=모듈)마다 독립 git repo 인 환경 — manifest 의 repo 를 프로젝트명과
-        //   일치(repo===name)시킨다. 물리적으로 한 work-tree 아래 함께 있어도 도메인상 각자 별도 repo 라
-        //   standalone 으로 취급한다: gitRepo 마커를 프로젝트명으로 찍고, pulls/impact 도 프로젝트별 1벌로
-        //   둔다(모노레포 repo 단위 1벌 집계는 쓰지 않음).
+        // NEXCORE 는 한 work-tree(= git repo) 아래 bizunit 모듈이 모여 있는 모노레포다. 따라서 산출물
+        //   계층은 projects/<namespace>/<repo>/<perRoot> = <namespace>/nexcore/<bizunit> 가 된다:
+        //   repo 슬롯엔 실제 git repo 명(work-tree basename, 보통 "nexcore"), perRoot 슬롯엔 bizunit.
+        //   pulls/impact 는 여전히 bizunit 그래프별 1벌(각 모듈에 닿는 PR 변경만 귀속).
         GitLog git = new GitLog(repo);
         boolean isGit = git.isGitRepo();
-        // namespace: origin owner when a remote exists, else the work-tree basename (e.g. "nexcore").
-        // repo===perRoot===project (each bizunit is treated as its own standalone repo).
-        String namespace = git.namespace();
-        if (namespace == null) namespace = git.repoName();
+        // repo: 실제 git work-tree basename (예: "nexcore") — gitRepo 마커이자 경로의 repo 슬롯.
+        String repoName = git.repoName();
+        // namespace: --namespace(flowmap.config NAMESPACE) > origin owner > repoName 폴백.
+        //   nexcore 샘플은 origin remote 가 없어 config 의 NAMESPACE 로 실제 소속을 지정한다.
+        String namespace = args.get("namespace");
+        if (namespace == null || namespace.isBlank()) namespace = git.namespace();
+        if (namespace == null || namespace.isBlank()) namespace = repoName;
         List<String> projects = discoverProjects(repo);
 
         List<String> built = new ArrayList<>();
@@ -177,9 +180,9 @@ public final class Cli {
             SourceScanner.Scan scan = SourceScanner.scan(repo, project);
             if (scan.units.isEmpty()) continue; // no ghost graphs
             CallGraph graph = GraphBuilder.buildProject(global, project);
-            Path svc = serviceDir(outDir, namespace, project, project);
+            Path svc = serviceDir(outDir, namespace, repoName, project);
             Map<String, Object> meta = analyzeMeta(repo.toString(), project, scan, graph);
-            if (isGit) { meta.put("gitNamespace", namespace); meta.put("gitRepo", project); }   // → manifest.namespace/repo
+            if (isGit) { meta.put("gitNamespace", namespace); meta.put("gitRepo", repoName); }   // → manifest.namespace/repo
             JsonOutput.write(graph.toNodeLink(meta), svc.resolve("graph.json"));
             LinkedHashMap<String, Object> doc = OpenApi.generate(scan, repo, project, "1.0.0");
             JsonOutput.write(doc, svc.resolve("openapi.json"));
@@ -196,11 +199,11 @@ public final class Cli {
         // impact + pulls (needs git history). PR-based, per-service — identical file paths and
         // schema to flowmap-spring: <svc>.pulls.json + <svc>.pulls/<n>.json and
         // <svc>.impact.json (bare impact.json staging name) + <svc>.impact/<n>.json shards.
-        //   각 프로젝트가 독립 repo 이므로 항상 프로젝트별 1벌(standalone)로 집계한다. 한 work-tree 의
-        //   PR 이라도 변경 파일이 그 프로젝트 그래프 노드와 닿는 것만 impact 로 귀속된다.
+        //   bizunit 모듈별 1벌로 집계한다. 한 work-tree 의 PR 이라도 변경 파일이 그 모듈 그래프 노드와
+        //   닿는 것만 impact 로 귀속된다.
         if (doImpact && isGit) {
             for (String project : built) {
-                Path svc = serviceDir(outDir, namespace, project, project);
+                Path svc = serviceDir(outDir, namespace, repoName, project);
                 generatePullsAndImpact(git, repo.toFile(), project, svc, svc.resolve("graph.json"), impactMax);
             }
             System.out.println("  pulls/impact analyzed (" + built.size() + " projects)");
