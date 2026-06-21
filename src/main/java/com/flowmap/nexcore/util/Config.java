@@ -37,7 +37,9 @@ public final class Config {
                 int eq = line.indexOf('=');
                 if (eq <= 0) continue;
                 String key = line.substring(0, eq).trim();
-                String val = subst(line.substring(eq + 1).trim(), kv);
+                // 값 뒤 인라인 주석(`KEY=val   # ...`) 제거 — 공백+'#' 부터 줄 끝까지 잘라낸다.
+                String rawVal = line.substring(eq + 1).replaceFirst("\\s+#.*$", "").trim();
+                String val = subst(rawVal, kv);
                 kv.put(key, val);
             }
         } catch (IOException e) {
@@ -54,6 +56,10 @@ public final class Config {
         if (kv.containsKey("OUT_DIR")) {
             argv.add("--out-dir");
             argv.add(kv.get("OUT_DIR"));
+        }
+        if (kv.containsKey("NAMESPACE") && !kv.get("NAMESPACE").isEmpty()) {
+            argv.add("--namespace");
+            argv.add(kv.get("NAMESPACE"));
         }
         if (kv.containsKey("EXTRA_ARGS") && !kv.get("EXTRA_ARGS").isEmpty()) {
             for (String tok : kv.get("EXTRA_ARGS").split("\\s+")) argv.add(tok);

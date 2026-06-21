@@ -9,6 +9,10 @@
 REPO=../nexcore
 
 # ───────────── 선택 (optional) ─────────────
+# 산출물 경로 namespace 슬롯(소속 org). 지정 시 projects/<NAMESPACE>/<repo>/<perRoot>/ 가 된다.
+#   nexcore 는 origin remote 가 없어 namespace 를 자동 도출 못 하므로 여기서 명시한다.
+#   미지정 시: origin owner → (그래도 없으면) git repo 명(work-tree basename)으로 폴백.   -> --namespace
+# NAMESPACE=kakaopay
 # COMMAND=refresh             # 실행 명령 (analyze|combine|openapi|impact|refresh|sync)
 # OUT_DIR=json                # 산출물(스테이징) 디렉터리 — json/service/<svc>/ 트리 생성  -> --out-dir
 # SYNC_DIR=../docs/web/data   # 02-sync.sh 가 staging 트리를 펼쳐 넣을 웹앱 data 디렉터리
