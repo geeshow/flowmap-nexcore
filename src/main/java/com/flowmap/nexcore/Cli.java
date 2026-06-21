@@ -6,6 +6,7 @@ import com.flowmap.nexcore.impact.GitLog;
 import com.flowmap.nexcore.impact.Impact;
 import com.flowmap.nexcore.impact.PrImpact;
 import com.flowmap.nexcore.model.CallGraph;
+import com.flowmap.nexcore.model.MethodNode;
 import com.flowmap.nexcore.nexcore.GraphBuilder;
 import com.flowmap.nexcore.nexcore.SourceScanner;
 import com.flowmap.nexcore.openapi.OpenApi;
@@ -176,19 +177,44 @@ public final class Cli {
         List<String> projects = discoverProjects(repo);
 
         List<String> built = new ArrayList<>();
+        Map<String, String[]> nsRepoOf = new LinkedHashMap<>();   // project → {namespace, repo}
+        Map<String, Path> gitRootOf = new LinkedHashMap<>();      // project → pulls/impact git work-tree
         for (String project : projects) {
             SourceScanner.Scan scan = SourceScanner.scan(repo, project);
             if (scan.units.isEmpty()) continue; // no ghost graphs
             CallGraph graph = GraphBuilder.buildProject(global, project);
-            Path svc = serviceDir(outDir, namespace, repoName, project);
+
+            // 개별 프로젝트 .git 최우선: repo/<project>/.git 이 그 프로젝트 자신의 git 이면 namespace/repo·
+            //   파일경로·pulls/impact 를 그 git 기준으로 도출한다. 없으면 work-tree(모노레포) 폴백.
+            Path projRoot = repo.resolve(project);
+            boolean ownGit = Files.exists(projRoot.resolve(".git"));   // 부모 work-tree 가 아닌 "자신의" .git
+            GitLog projGit = ownGit ? new GitLog(projRoot) : null;
+            String pNs, pRepo; Path pGitRoot; boolean pIsGit;
+            if (projGit != null && projGit.isGitRepo()) {
+                pRepo = projGit.repoSlug();
+                pNs = args.get("namespace");
+                if (pNs == null || pNs.isBlank()) pNs = projGit.namespace();
+                if (pNs == null || pNs.isBlank()) pNs = pRepo;
+                pGitRoot = projRoot; pIsGit = true;
+                // 파일 경로 재기준화: work-tree 상대("<project>/src/…") → 프로젝트 루트 상대("src/…")
+                String prefix = project + "/";
+                for (MethodNode n : graph.nodes())
+                    if (n.file != null && n.file.startsWith(prefix)) n.file = n.file.substring(prefix.length());
+            } else {
+                pNs = namespace; pRepo = repoName; pGitRoot = repo; pIsGit = isGit;
+            }
+
+            Path svc = serviceDir(outDir, pNs, pRepo, project);
             Map<String, Object> meta = analyzeMeta(repo.toString(), project, scan, graph);
-            if (isGit) { meta.put("gitNamespace", namespace); meta.put("gitRepo", repoName); }   // → manifest.namespace/repo
+            if (pIsGit) { meta.put("gitNamespace", pNs); meta.put("gitRepo", pRepo); }   // → manifest.namespace/repo
             JsonOutput.write(graph.toNodeLink(meta), svc.resolve("graph.json"));
             LinkedHashMap<String, Object> doc = OpenApi.generate(scan, repo, project, "1.0.0");
             JsonOutput.write(doc, svc.resolve("openapi.json"));
             built.add(project);
+            nsRepoOf.put(project, new String[]{pNs, pRepo});
+            gitRootOf.put(project, pGitRoot);
             System.out.println("  analyzed " + project + " (" + graph.nodes().size()
-                    + " nodes, " + graph.edges().size() + " edges)");
+                    + " nodes, " + graph.edges().size() + " edges) → " + pNs + "/" + pRepo);
         }
 
         // combined graph + repo-wide openapi (combine is now mostly a merge; s2s already in graphs)
@@ -201,14 +227,19 @@ public final class Cli {
         // <svc>.impact.json (bare impact.json staging name) + <svc>.impact/<n>.json shards.
         //   bizunit 모듈별 1벌로 집계한다. 한 work-tree 의 PR 이라도 변경 파일이 그 모듈 그래프 노드와
         //   닿는 것만 impact 로 귀속된다.
-        if (doImpact && isGit) {
+        if (doImpact) {
+            int analyzed = 0;
             for (String project : built) {
-                Path svc = serviceDir(outDir, namespace, repoName, project);
-                generatePullsAndImpact(git, repo.toFile(), project, svc, svc.resolve("graph.json"), impactMax);
+                Path gr = gitRootOf.get(project);
+                GitLog pg = gr.equals(repo) ? git : new GitLog(gr);   // 개별 프로젝트 git 또는 work-tree
+                if (!pg.isGitRepo()) continue;
+                String[] nsr = nsRepoOf.get(project);
+                Path svc = serviceDir(outDir, nsr[0], nsr[1], project);
+                generatePullsAndImpact(pg, gr.toFile(), project, svc, svc.resolve("graph.json"), impactMax);
+                analyzed++;
             }
-            System.out.println("  pulls/impact analyzed (" + built.size() + " projects)");
-        } else if (doImpact) {
-            System.out.println("  impact skipped (" + repo + " is not a git repository)");
+            if (analyzed > 0) System.out.println("  pulls/impact analyzed (" + analyzed + " projects)");
+            else System.out.println("  impact skipped (no git repository)");
         }
 
         Manifest.write(outDir);

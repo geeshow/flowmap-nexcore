@@ -220,6 +220,23 @@ public final class GitLog {
     }
 
     /**
+     * Repo name from this repo's {@code origin} remote (last path segment of the normalized web
+     * base), or the work-tree basename when there is no usable remote. Used as the {@code repo}
+     * slot of the output layout {@code projects/<namespace>/<repo>/<perRoot>/}.
+     */
+    public String repoSlug() {
+        String web = toWebBase(remoteUrl());
+        if (web != null) {
+            String[] segs = web.replaceFirst("^https://", "").split("/");
+            if (segs.length >= 1) {
+                String last = segs[segs.length - 1];
+                if (last != null && !last.isBlank()) return last;
+            }
+        }
+        return repoName();
+    }
+
+    /**
      * Normalize a git remote URL to its https web base (no trailing {@code .git}),
      * handling scp-style ({@code git@host:owner/repo.git}), {@code ssh://}, and
      * {@code http(s)://} forms and stripping embedded credentials. Pure (no git call).
