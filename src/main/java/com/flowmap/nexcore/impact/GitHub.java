@@ -390,6 +390,7 @@ public final class GitHub {
         m.put("author", shard.get("author"));
         m.put("mergedAt", shard.get("mergedAt"));
         m.put("updatedAt", shard.get("updatedAt"));
+        m.put("mergeCommit", shard.get("mergeCommit"));   // 배포 이미지 태그(...:<branch>-<sha>) 매칭용 커밋 SHA
         m.put("status", shard.get("status"));
         m.put("url", shard.get("url"));
         m.put("additions", shard.get("additions"));
