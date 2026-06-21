@@ -34,15 +34,36 @@ public final class GitHub {
         public final int number;
         public final String title;
         public final String author;
-        public final String mergedAt;
-        public final String mergeCommit;   // merge/squash commit oid; null if unavailable
+        public final String mergedAt;       // merge time; null for an open PR
+        public final String updatedAt;      // open PR last-updated (date for display/sort); null for merged
+        public final String mergeCommit;    // merge/squash commit oid; null for an open PR
+        public final String headOid;        // open PR head commit oid (analyzed revision); null for merged
+        public final String status;         // merged | open | draft | closed
 
+        /** Merged PR (git-first / gh fallback) — the common case. */
         public Pr(int number, String title, String author, String mergedAt, String mergeCommit) {
+            this(number, title, author, mergedAt, null, mergeCommit, null, "merged");
+        }
+
+        public Pr(int number, String title, String author, String mergedAt, String updatedAt,
+                  String mergeCommit, String headOid, String status) {
             this.number = number;
             this.title = title;
             this.author = author;
             this.mergedAt = mergedAt;
+            this.updatedAt = updatedAt;
             this.mergeCommit = mergeCommit;
+            this.headOid = headOid;
+            this.status = status == null ? "merged" : status;
+        }
+
+        /** The commit whose first-parent / merge-base diff is this PR's net change (merge oid, or open head). */
+        public String analyzedCommit() {
+            return mergeCommit != null ? mergeCommit : headOid;
+        }
+
+        public boolean isOpen() {
+            return "open".equals(status) || "draft".equals(status);
         }
     }
 
@@ -136,6 +157,53 @@ public final class GitHub {
         Exec r = gh(repo, args);
         if (r.code != 0) return null;
         return parse(r.out);
+    }
+
+    /**
+     * Open (incl. draft) PRs targeting {@code base} via {@code gh pr list --state open}. gh-ONLY:
+     * open PRs have no commit on the base branch's first-parent history, so git-log can't find them.
+     * Returns an empty list when {@code gh} can't run or there is no remote (e.g. the nexcore sample).
+     */
+    public static List<Pr> openPulls(File repo, String base, int limit) {
+        List<String> args = new ArrayList<>(List.of(
+                "pr", "list", "--state", "open", "--limit", String.valueOf(limit),
+                "--json", "number,title,author,headRefOid,createdAt,updatedAt,isDraft"));
+        if (base != null) {
+            args.add("--base");
+            args.add(base);
+        }
+        Exec r = gh(repo, args);
+        if (r.code != 0) return new ArrayList<>();   // no gh / no remote → simply no open PRs
+        return parseOpen(r.out);
+    }
+
+    /** Parse {@code gh pr list} open-state JSON (headRefOid/updatedAt/isDraft) into open PRs. Pure. */
+    public static List<Pr> parseOpen(String json) {
+        JsonNode root;
+        try {
+            root = MAPPER.readTree(json);
+        } catch (Exception e) {
+            return new ArrayList<>();
+        }
+        List<Pr> out = new ArrayList<>();
+        if (root == null || !root.isArray()) return out;
+        for (JsonNode n : root) {
+            JsonNode num = n.path("number");
+            if (!num.isNumber()) continue;
+            String updated = blankToNull(n.path("updatedAt").asText(null));
+            if (updated == null) updated = blankToNull(n.path("createdAt").asText(null));
+            boolean draft = n.path("isDraft").asBoolean(false);
+            out.add(new Pr(
+                    num.asInt(),
+                    n.path("title").asText(""),
+                    blankToNull(n.path("author").path("login").asText(null)),
+                    null,                                                       // mergedAt — open, not merged
+                    updated,
+                    null,                                                       // mergeCommit — none yet
+                    blankToNull(n.path("headRefOid").asText(null)),
+                    draft ? "draft" : "open"));
+        }
+        return out;
     }
 
     /** Parse {@code gh pr list --json number,title,author,mergedAt,mergeCommit} output. Pure. */
@@ -296,7 +364,9 @@ public final class GitHub {
         m.put("title", pr.title);
         m.put("author", pr.author);
         m.put("mergedAt", pr.mergedAt);
-        m.put("mergeCommit", pr.mergeCommit);
+        m.put("updatedAt", pr.updatedAt);
+        m.put("status", pr.status);
+        m.put("mergeCommit", pr.analyzedCommit());
         m.put("url", webBase == null ? null : webBase + "/pull/" + pr.number);
         m.put("repoUrl", webBase);
         m.put("additions", additions);
@@ -313,6 +383,8 @@ public final class GitHub {
         m.put("title", shard.get("title"));
         m.put("author", shard.get("author"));
         m.put("mergedAt", shard.get("mergedAt"));
+        m.put("updatedAt", shard.get("updatedAt"));
+        m.put("status", shard.get("status"));
         m.put("url", shard.get("url"));
         m.put("additions", shard.get("additions"));
         m.put("deletions", shard.get("deletions"));
