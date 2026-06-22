@@ -161,6 +161,11 @@ public final class Cli {
         int impactDepth = args.getInt("impact-depth", 3);
         String allTitle = args.get("title", "flowmap-nexcore-all");
 
+        // Pull every git work-tree FIRST (before scanning), so the call graph and impact see the
+        // latest merged PRs — otherwise a stale .repo checkout silently analyzes old history.
+        // Matches flowmap-spring/flowmap-react refresh; pass --no-pull to skip.
+        if (!args.has("no-pull")) pullRepos(repo);
+
         // One repo-wide scan → global index, so cross-project shared calls resolve to real
         // s2s edges inside each per-project graph (the web merges graphs by node id).
         SourceScanner.Scan all = SourceScanner.scan(repo, null);
@@ -256,6 +261,24 @@ public final class Cli {
         System.out.println("refresh complete → " + outDir + " (" + built.size() + " projects)");
     }
 
+    /**
+     * Fast-forward pull every distinct git work-tree involved in this refresh — the monorepo root
+     * and any per-project {@code .git} — BEFORE scanning, so analysis + impact mine the latest
+     * history. Best-effort: each repo's checked-out branch is pulled {@code --ff-only}; a failure
+     * is logged and the refresh continues on the current checkout.
+     */
+    private static void pullRepos(Path repo) throws IOException {
+        java.util.LinkedHashSet<Path> roots = new java.util.LinkedHashSet<>();
+        if (new GitLog(repo).isGitRepo()) roots.add(repo.toAbsolutePath().normalize());
+        for (String project : discoverProjects(repo)) {
+            Path projRoot = repo.resolve(project);
+            if (Files.exists(projRoot.resolve(".git")) && new GitLog(projRoot).isGitRepo())
+                roots.add(projRoot.toAbsolutePath().normalize());
+        }
+        if (roots.isEmpty()) { System.out.println("  pull skipped (no git repository)"); return; }
+        for (Path g : roots) System.out.println("  - " + g.getFileName() + ": " + new GitLog(g).pull());
+    }
+
     // ---------- pulls (PR-based pulls/impact only; reuses existing graphs) ----------
 
     /**
@@ -277,6 +300,9 @@ public final class Cli {
         Path outDir = Path.of(args.get("out-dir", DEFAULT_OUT_DIR));
         int impactMax = args.getInt("impact-max", 50);
         String only = args.get("project");   // optional: restrict to a single perRoot
+
+        // Refresh the checkout(s) first so newly-merged/opened PRs are visible (--no-pull to skip).
+        if (!args.has("no-pull")) pullRepos(repo);
 
         List<Path> svcDirs = new ArrayList<>();
         for (Path d : leafProjectDirs(outDir)) {

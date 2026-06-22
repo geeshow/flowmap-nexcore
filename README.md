@@ -100,9 +100,14 @@ DB 접근은 `db:io`. `kind`/`mode` 는 flowmap enum(`internal|external|s2s|batc
 | `combine --dir <d> --out <f>` | 모듈 그래프 통합 + `ext:SHARED` → s2s 재연결 |
 | `openapi --repo <r> [--project <p>] --title <t> --out <f>` | `.jmd` 트랜잭션 → OpenAPI 3.1 (operationId=node id) |
 | `impact --git <r> --graph <g> [--max N] [--depth N] --out <f>` | git 커밋 → 변경 메서드 → 영향 엔드포인트 |
-| `pulls --git <r> --graph <g> --out <f>` | 머지 PR 파일 diff 인덱스(+ 샤드) 생성 — 재분석 없이 PR 메타만 갱신 |
-| `refresh [--repo <r>] [--out-dir <d>] [--no-impact]` | 위 전부 오케스트레이션 → `<out-dir>/projects/<namespace>/<repo>/<per-root>/` 트리 + 집계본 |
+| `pulls [--repo <r>] [--out-dir <d>] [--project <p>] [--no-pull]` | staging 그래프 재사용해 PR(머지+오픈) diff·impact 만 갱신 (재분석 없음) |
+| `refresh [--repo <r>] [--out-dir <d>] [--no-impact] [--no-pull]` | 위 전부 오케스트레이션 → `<out-dir>/projects/<namespace>/<repo>/<per-root>/` 트리 + 집계본 |
 | `sync --out-dir <d> --sync-dir <web>` | staging 서비스 트리를 웹 data 로 flat 펼침 + manifest 병합 (재분석 없음) |
+
+> **자동 pull**: `refresh`·`pulls` 는 **분석 전에** 대상 work-tree(모노레포 루트 + 개별 `.git`)의
+> 체크아웃 브랜치를 `git pull --ff-only` 로 최신화한다(flowmap-spring/react 와 동일). 그래서 `.repo`
+> 체크아웃이 뒤처져 있어도 콜그래프·영향도가 **최신 머지 PR**을 반영한다. ff 불가/네트워크 실패 시
+> 로그만 남기고 현재 체크아웃으로 계속한다. 끄려면 `--no-pull`.
 
 산출물 스키마/연동은 `flowmap-spring` 의 `MANUAL.md` 4장과 동일하다(형제 디렉터리 또는
 [모노레포](https://github.com/geeshow/flowmap5) 참고).
@@ -117,6 +122,8 @@ DB 접근은 `db:io`. `kind`/`mode` 는 flowmap enum(`internal|external|s2s|batc
 ## 한계
 
 - 문자열 인자는 **리터럴**(+ 단순)만 해석한다. `final static` 상수 참조 등 심볼 해석이 필요한 경우는 미해석.
-- impact 는 git 작업트리가 필요하다(`../nexcore` 에 git 미설정 시 refresh가 impact 단계를 건너뜀). 의미 있는
+- impact 는 git 작업트리가 필요하다(`../nexcore` 에 git 미설정 시 refresh가 pull/impact 단계를 건너뜀). 의미 있는
   영향도는 커밋 히스토리가 쌓인 뒤 나온다. 삭제 엔드포인트/breaking 탐지는 현재 미구현(빈 배열로 출력).
+- 자동 pull 은 **현재 체크아웃 브랜치**를 `--ff-only` 로 당긴다 — work-tree 가 분석 대상이 아닌 다른
+  브랜치에 있거나 로컬에 ff 불가한 커밋이 있으면 pull 이 건너뛰어진다(브랜치를 직접 맞춰두거나 `--no-pull`).
 - OpenAPI 요청/응답 스키마는 `uio/*.uio` 명세가 있으면 필드까지, 없으면 `common_header`+`data` opaque 봉투로 생성.
