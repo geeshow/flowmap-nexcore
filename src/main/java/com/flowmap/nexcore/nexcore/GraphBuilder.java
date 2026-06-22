@@ -239,7 +239,12 @@ public final class GraphBuilder {
                     .layer(Layer.RESOURCE).resourceType("db-table").build();
         }
         graph.addNode(n);
-        addEdge(srcId, id, "db:io", EdgeKind.RESOURCE, CallMode.SYNC, call, u);
+        // record the sqlId on the edge so xsql change-impact can map a changed statement
+        // back to exactly this DataUnit method (the dbXxx call site), not the whole class.
+        CallEdge e = new CallEdge(srcId, id, CallMode.SYNC, EdgeKind.RESOURCE, "db:io",
+                u.relFile, Ast.beginLine(call));
+        e.sqlId = sqlId;
+        if (!srcId.equals(id)) graph.addEdge(e);
     }
 
     // ---------- outbound label back-scan ----------
