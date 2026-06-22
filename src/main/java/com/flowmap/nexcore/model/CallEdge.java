@@ -18,6 +18,8 @@ public final class CallEdge {
     public String relation;
     public String callSiteFile;
     public Integer callSiteLine;
+    /** For {@code db:io} edges: the xsql statement id (sqlId) the {@code dbXxx} call selected. */
+    public String sqlId;
 
     public CallEdge(String source, String target, CallMode mode, EdgeKind kind,
                     String relation, String callSiteFile, Integer callSiteLine) {
@@ -44,6 +46,7 @@ public final class CallEdge {
         m.put("relation", relation);
         m.put("callSiteFile", callSiteFile);
         m.put("callSiteLine", callSiteLine);
+        if (sqlId != null) m.put("sqlId", sqlId);
         return m;
     }
 }

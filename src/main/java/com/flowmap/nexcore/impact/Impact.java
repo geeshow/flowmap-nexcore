@@ -44,6 +44,33 @@ public final class Impact {
             String t = e.path("target").asText();
             callers.computeIfAbsent(t, k -> new ArrayList<>()).add(s);
         }
+        // class simpleName → its method node ids. Lets a changed *.xsql map back to the
+        // owning DataUnit/batch class (xsql base name == class name) and seed all of that
+        // class's method nodes — reverse-BFS then reaches the FU/PU above it.
+        Map<String, List<String>> nodesBySimple = new LinkedHashMap<>();
+        for (JsonNode n : graph.path("nodes")) {
+            String fqcn = n.path("fqcn").asText("");
+            if (fqcn.isEmpty()) continue;
+            String simple = fqcn.substring(fqcn.lastIndexOf('.') + 1);
+            nodesBySimple.computeIfAbsent(simple, k -> new ArrayList<>()).add(n.path("id").asText());
+        }
+        // precise index: (owning class simpleName, sqlId) → DataUnit method node ids that call
+        // dbXxx("<sqlId>"). Lets a changed xsql statement seed only the exact call sites.
+        // haveSqlIds=false on older graphs (no sqlId on db:io edges) → always fall back to file level.
+        Map<String, List<String>> sqlIndex = new LinkedHashMap<>();
+        boolean haveSqlIds = false;
+        for (JsonNode e : graph.path("edges")) {
+            JsonNode sid = e.path("sqlId");
+            if (sid.isMissingNode() || sid.isNull()) continue;
+            haveSqlIds = true;
+            String src = e.path("source").asText();
+            JsonNode srcNode = nodeById.get(src);
+            if (srcNode == null) continue;
+            String fqcn = srcNode.path("fqcn").asText("");
+            if (fqcn.isEmpty()) continue;
+            String simple = fqcn.substring(fqcn.lastIndexOf('.') + 1);
+            sqlIndex.computeIfAbsent(sqlKey(simple, sid.asText()), k -> new ArrayList<>()).add(src);
+        }
 
         String resolvedBranch = git.resolveBranch(branch);
         List<GitLog.Commit> commits;
@@ -64,6 +91,30 @@ public final class Impact {
         for (GitLog.Commit c : commits) {
             Set<String> changed = new LinkedHashSet<>();
             for (String file : c.changedFiles) {
+                if (file.endsWith(".xsql")) {
+                    // statement-level granularity: map changed SQL statements (sqlIds) back to the
+                    // exact DataUnit methods that call dbXxx("<sqlId>"). Fall back to whole-class
+                    // seeding when the change can't be pinned to statements (header/shared-sql edit,
+                    // straddling hunk, unknown sqlId, or a pre-sqlId graph).
+                    String base = baseName(file);
+                    Set<String> seeds = new LinkedHashSet<>();
+                    boolean precise = haveSqlIds;
+                    if (precise) {
+                        XsqlDiff.Result r = XsqlDiff.of(git.blob(c.sha, file), c.hunks.get(file));
+                        if (r.coarse || r.ids.isEmpty()) {
+                            precise = false;
+                        } else {
+                            for (String id : r.ids) {
+                                List<String> srcs = sqlIndex.get(sqlKey(base, id));
+                                if (srcs == null || srcs.isEmpty()) { precise = false; break; }
+                                seeds.addAll(srcs);
+                            }
+                        }
+                    }
+                    if (!precise) seeds = new LinkedHashSet<>(nodesBySimple.getOrDefault(base, List.of()));
+                    changed.addAll(seeds);
+                    continue;
+                }
                 if (!file.endsWith(".java")) continue;
                 List<int[]> hunks = c.hunks.getOrDefault(file, List.of());
                 if (hunks.isEmpty()) continue;
@@ -138,6 +189,18 @@ public final class Impact {
         out.put("endpointImpact", endpointImpact);
         out.put("deletedEndpoints", new ArrayList<>());
         return out;
+    }
+
+    /** Index key for (owning class, sqlId); case-insensitive on the sqlId for robustness. */
+    private static String sqlKey(String classSimple, String sqlId) {
+        return classSimple + " " + sqlId.toLowerCase();
+    }
+
+    /** "a/b/DAC0002.xsql" → "DAC0002". */
+    private static String baseName(String path) {
+        String name = path.substring(path.lastIndexOf('/') + 1);
+        int dot = name.lastIndexOf('.');
+        return dot >= 0 ? name.substring(0, dot) : name;
     }
 
     private static Set<String> changedMethods(JavaParser parser, String src, List<int[]> hunks) {
