@@ -15,5 +15,5 @@ REPO=../nexcore
 # NAMESPACE=kakaopay
 # COMMAND=refresh             # 실행 명령 (analyze|combine|openapi|impact|refresh|sync)
 # OUT_DIR=json                # 산출물(스테이징) 디렉터리 — json/service/<svc>/ 트리 생성  -> --out-dir
-# SYNC_DIR=../docs/web/data   # 02-sync.sh 가 staging 트리를 펼쳐 넣을 웹앱 data 디렉터리
+# SYNC_DIR=../web/data   # 02-sync.sh 가 staging 트리를 펼쳐 넣을 웹앱 data 디렉터리
 # EXTRA_ARGS=                 # 추가 플래그 (예: --no-impact --impact-depth 4)
