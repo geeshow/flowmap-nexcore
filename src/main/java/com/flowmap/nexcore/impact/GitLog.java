@@ -385,6 +385,34 @@ public final class GitLog {
         }
     }
 
+    /**
+     * Fast-forward pull the currently checked-out branch of this work-tree (best-effort, matching
+     * flowmap-spring/flowmap-react refresh). Captures combined stdout+stderr and returns a short
+     * one-line status for logging. Never throws — a failed pull leaves the existing checkout intact,
+     * so analysis still runs (just on the stale history).
+     */
+    public String pull() {
+        String cur = currentBranch();
+        String at = (cur.isEmpty() || cur.equals("HEAD")) ? "" : "@" + cur;
+        try {
+            ProcessBuilder pb = new ProcessBuilder("git", "-C", repo.toString(), "pull", "--ff-only");
+            pb.redirectErrorStream(true);
+            Process proc = pb.start();
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
+                String l;
+                while ((l = r.readLine()) != null) sb.append(l).append('\n');
+            }
+            int code = proc.waitFor();
+            String last = "";
+            for (String s : sb.toString().split("\n")) if (!s.isBlank()) last = s.trim();
+            if (last.length() > 80) last = last.substring(0, 80);
+            return (code == 0 ? "pulled" : "PULL FAILED") + at + (last.isEmpty() ? "" : " (" + last + ")");
+        } catch (Exception e) {
+            return "PULL FAILED" + at + " (" + e.getMessage() + ")";
+        }
+    }
+
     private String run(String... gitArgs) throws IOException, InterruptedException {
         List<String> cmd = new ArrayList<>();
         cmd.add("git");
