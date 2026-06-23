@@ -65,6 +65,28 @@ public final class PrImpact {
             callers.computeIfAbsent(e.path("target").asText(), k -> new ArrayList<>())
                     .add(e.path("source").asText());
         }
+        // xsql change-impact indexes (same model as commit-based Impact):
+        //   nodesBySimple — class simpleName → its method node ids (file-level fallback seed)
+        //   sqlIndex      — (DataUnit simpleName, sqlId) → DataUnit method node ids that call dbXxx("<sqlId>")
+        //   haveSqlIds    — false on pre-sqlId graphs → always fall back to file-level seeding
+        Map<String, List<String>> nodesBySimple = new LinkedHashMap<>();
+        for (JsonNode n : graph.path("nodes")) {
+            String fqcn = n.path("fqcn").asText("");
+            if (fqcn.isEmpty()) continue;
+            nodesBySimple.computeIfAbsent(simpleOf(fqcn), k -> new ArrayList<>()).add(n.path("id").asText());
+        }
+        Map<String, List<String>> sqlIndex = new LinkedHashMap<>();
+        boolean haveSqlIds = false;
+        for (JsonNode e : graph.path("edges")) {
+            JsonNode sid = e.path("sqlId");
+            if (sid.isMissingNode() || sid.isNull()) continue;
+            haveSqlIds = true;
+            JsonNode srcNode = nodeById.get(e.path("source").asText());
+            String fqcn = srcNode == null ? "" : srcNode.path("fqcn").asText("");
+            if (fqcn.isEmpty()) continue;
+            sqlIndex.computeIfAbsent(sqlKey(simpleOf(fqcn), sid.asText()), k -> new ArrayList<>())
+                    .add(e.path("source").asText());
+        }
         String webBase = git.webBaseUrl();
 
         JavaParser parser = new JavaParser(new ParserConfiguration()
@@ -97,6 +119,15 @@ public final class PrImpact {
             LinkedHashSet<String> deletedIds = new LinkedHashSet<>();
 
             for (GitLog.FileChange ch : changes) {
+                if (ch.path.endsWith(".xsql")) {
+                    // statement-level: map changed sqlIds back to the DataUnit methods calling
+                    // dbXxx("<sqlId>"); fall back to whole-class seeding when not pinnable.
+                    String duBase = baseName(ch.path);
+                    for (String id : xsqlSeeds(git, sha, ch, duBase, haveSqlIds, sqlIndex, nodesBySimple)) {
+                        changedFns.putIfAbsent(id, new Fn(id, "public", 0, 0));
+                    }
+                    continue;
+                }
                 if (!ch.path.endsWith(".java")) continue;
                 String newText = "DELETE".equals(ch.changeType) ? null : git.fileAt(sha, ch.path);
                 Parsed newParsed = newText == null ? Parsed.EMPTY : parseUnit(parser, newText);
@@ -273,6 +304,52 @@ public final class PrImpact {
     private static String textOrNull(JsonNode n, String field) {
         JsonNode v = n.path(field);
         return v.isNull() || v.isMissingNode() ? null : v.asText();
+    }
+
+    // ---------- xsql change → DataUnit seeds ----------
+
+    /**
+     * DataUnit method node ids impacted by a changed {@code *.xsql}. Precise path: extract the
+     * changed sqlIds ({@link XsqlDiff}) and resolve each via {@code sqlIndex}. Falls back to the
+     * whole owning class ({@code nodesBySimple}) when the change can't be pinned to statements
+     * (file delete, header/shared-sql edit, straddling hunk, unknown sqlId, or a pre-sqlId graph).
+     */
+    private static Set<String> xsqlSeeds(GitLog git, String sha, GitLog.FileChange ch, String base,
+                                         boolean haveSqlIds, Map<String, List<String>> sqlIndex,
+                                         Map<String, List<String>> nodesBySimple) {
+        Set<String> seeds = new LinkedHashSet<>();
+        boolean precise = haveSqlIds && !"DELETE".equals(ch.changeType);
+        if (precise) {
+            XsqlDiff.Result r = XsqlDiff.of(git.fileAt(sha, ch.path), ch.newRanges);
+            if (r.coarse || r.ids.isEmpty()) {
+                precise = false;
+            } else {
+                for (String id : r.ids) {
+                    List<String> srcs = sqlIndex.get(sqlKey(base, id));
+                    if (srcs == null || srcs.isEmpty()) { precise = false; break; }
+                    seeds.addAll(srcs);
+                }
+            }
+        }
+        if (!precise) seeds = new LinkedHashSet<>(nodesBySimple.getOrDefault(base, List.of()));
+        return seeds;
+    }
+
+    /** "...biz.DAC0002" → "DAC0002". */
+    private static String simpleOf(String fqcn) {
+        return fqcn.substring(fqcn.lastIndexOf('.') + 1);
+    }
+
+    /** Index key for (owning class, sqlId); case-insensitive on the sqlId for robustness. */
+    private static String sqlKey(String classSimple, String sqlId) {
+        return classSimple + " " + sqlId.toLowerCase();
+    }
+
+    /** "a/b/DAC0002.xsql" → "DAC0002". */
+    private static String baseName(String path) {
+        String name = path.substring(path.lastIndexOf('/') + 1);
+        int dot = name.lastIndexOf('.');
+        return dot >= 0 ? name.substring(0, dot) : name;
     }
 
     // ---------- Java method-range + code-line parsing ----------
